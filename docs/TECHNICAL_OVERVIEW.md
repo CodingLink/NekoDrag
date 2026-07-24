@@ -42,6 +42,9 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 .\build-vs18\Release\SuperDrag.exe
 ```
 
+诊断拖动问题时可用 `-DSUPERDRAG_TRACE=ON` 构建，拖动状态迁移和位置记录
+（100ms 节流）通过 `OutputDebugString` 输出，用 DebugView 抓取。
+
 ## 3. 模块划分
 
 | 模块 | 职责 |
@@ -85,18 +88,18 @@ wWinMain
 
 ## 5. 当前拖动实现
 
-当前实现是“低级鼠标钩子 + 合并更新 + 同步窗口定位”：
+当前实现是“低级鼠标钩子 + 钩子内即时异步定位”：
 
 ```text
 WH_MOUSE_LL
+  → 跳过 LLMHF_INJECTED 合成输入
   → 检查精确修饰键
   → WindowFromPoint + GA_ROOT
   → 窗口过滤和完整性等级检查
   → 建立 DragState
   → 吞掉本次左键按下/移动/释放
-  → 合并最新鼠标坐标
-  → 隐藏窗口处理 WM_APP 更新
-  → 同步 SetWindowPos
+  → 稳态移动在钩子回调内直接 SetWindowPos(SWP_ASYNCWINDOWPOS)
+  → 最大化恢复等慢路径仍走 WM_APP 消息
   → 左键释放后清理状态
 ```
 
@@ -104,19 +107,25 @@ WH_MOUSE_LL
 
 - `CurrentModifierMask()` 使用 `GetAsyncKeyState`。
 - `IsExactModifierMatch()` 要求没有额外修饰键。
-- 钩子回调只更新状态并投递消息。
-- `updatePending` 保证任意时刻最多只有一个移动更新消息。
-- `SetWindowPos` 当前故意不使用 `SWP_ASYNCWINDOWPOS`，避免旧位置请求晚于新位置执行导致抖动。
-- 使用 `SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE`，不改变尺寸、Z 序或 Topmost。
+- 稳态拖动移动**不再经过消息队列合并**，而是在 `WH_MOUSE_LL` 回调里立即用
+  `SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+  SWP_ASYNCWINDOWPOS | SWP_DEFERERASE` 调用 `SetWindowPos`。
+  `SWP_ASYNCWINDOWPOS` 把位置请求投递到目标线程，本线程永不因目标窗口繁忙而阻塞；
+  同一目标的请求按 FIFO 顺序执行，不会乱序。
+- `IsDragPositionReady()` 决定移动走钩子内快路径（稳态）还是消息线程慢路径
+  （开始待处理、最大化恢复中、释放待处理、移动失败）。
+- `lastAppliedOrigin` 跳过与上次相同的位置请求，抑制高回报率鼠标的冗余调用。
 - 最大化窗口先通过 `ShowWindowAsync(SW_RESTORE)` 恢复，再按鼠标相对位置重新计算锚点。
 - 恢复状态每 16ms 检查一次，最多 30 次。
 - 拖动期间鼠标消息被吞掉，防止目标窗口控件误触。
+- 拖动激活期间有 500ms 看门狗：物理左键已抬起但状态机仍 active 时强制 `EndDrag`，
+  防止钩子超时漏掉 `WM_LBUTTONUP` 后永久吞掉后续点击。
 
 ### 重要历史与限制
 
 不要直接恢复为“吞掉左键后投递 `WM_NCLBUTTONDOWN + HTCAPTION`”的方案。该方案已经实测无法拖动：真实左键按下被钩子吞掉后，目标窗口缺少原生移动循环所需的输入状态。
 
-当前同步 `SetWindowPos` 可以保证位置顺序，但目标窗口完全无响应时仍可能短暂阻塞主消息线程，这是目前的实现权衡。
+也不要恢复“合并投递 WM_APP + 同步 `SetWindowPos`”的方案。该方案在真实 Windows 上实测抖动且无法拖动：跨进程同步 `SetWindowPos` 会向目标线程 SendMessage，目标繁忙时阻塞本线程消息循环，而 `WH_MOUSE_LL` 回调依赖该循环喂入，阻塞导致钩子事件堆积或被 `LowLevelHooksTimeout` 跳过，解除阻塞后窗口爆发式跳动。此前观测到的“`SWP_ASYNCWINDOWPOS` 抖动”实际源于这一架构（位置按消息循环速率突发应用），而非 async 本身。
 
 ## 6. 窗口过滤和权限
 

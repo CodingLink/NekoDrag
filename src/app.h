@@ -36,6 +36,7 @@ class SuperDragApp {
         Point startCursor{};
         Point latestCursor{};
         Point grabOffset{};
+        Point lastAppliedOrigin{};
         Rect maximizedRect{};
     };
 
@@ -67,6 +68,8 @@ class SuperDragApp {
     bool IsTargetHigherIntegrity(HWND target) const;
     bool BeginDragFromHook(HWND target, Point cursor);
     void BeginDragOnMessageThread();
+    bool IsDragPositionReady() const noexcept;
+    void MoveTargetToLatestCursor();
     void ScheduleDragUpdate();
     void ApplyLatestDragPosition();
     void EndDrag();
@@ -104,6 +107,7 @@ class SuperDragApp {
     std::unique_ptr<ui::UiTheme> theme_;
     bool settingsStatusError_ = false;
     DragState drag_{};
+    DWORD lastMoveTraceTick_ = 0;
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;
 };

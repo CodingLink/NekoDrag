@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <cstdarg>
 #include <cstdint>
 #include <cwchar>
 #include <iterator>
@@ -30,6 +31,8 @@ constexpr UINT kMessageUpdateDrag = WM_APP + 3;
 constexpr UINT kMessageOpenSettings = WM_APP + 4;
 constexpr UINT kMessagePrivilegeHint = WM_APP + 5;
 constexpr UINT_PTR kRestoreTimer = 1;
+constexpr UINT_PTR kDragWatchdogTimer = 2;
+constexpr UINT kDragWatchdogIntervalMs = 500;
 constexpr unsigned kMaxRestoreAttempts = 30;
 
 constexpr UINT kTrayIconId = 1;
@@ -51,6 +54,22 @@ constexpr int kControlModifierGroup = 1010;
 constexpr int kControlHelp = 1011;
 
 SuperDragApp* gApp = nullptr;
+
+#ifdef SUPERDRAG_TRACE
+void TraceDragState(const wchar_t* format, ...) {
+    wchar_t buffer[256];
+    va_list args;
+    va_start(args, format);
+    _vsnwprintf_s(buffer, _TRUNCATE, format, args);
+    va_end(args);
+    OutputDebugStringW(L"[SuperDrag] ");
+    OutputDebugStringW(buffer);
+    OutputDebugStringW(L"\n");
+}
+#define SD_TRACE(...) TraceDragState(__VA_ARGS__)
+#else
+#define SD_TRACE(...) ((void)0)
+#endif
 
 std::wstring ErrorWithCode(const wchar_t* message, DWORD errorCode) {
     std::wstring result(message);
@@ -448,6 +467,17 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                 ScheduleDragUpdate();
                 return 0;
             }
+            if (wParam == kDragWatchdogTimer) {
+                // Self-healing: if the physical button was released but the
+                // release event never reached the hook (e.g. the hook was
+                // skipped after a timeout), end the drag instead of
+                // swallowing clicks forever.
+                if (drag_.active && !IsKeyDown(VK_LBUTTON)) {
+                    SD_TRACE(L"watchdog: button already up, ending drag");
+                    EndDrag();
+                }
+                return 0;
+            }
             break;
         case WM_QUERYENDSESSION:
             return TRUE;
@@ -747,6 +777,7 @@ bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
     drag_.latestCursor = cursor;
     drag_.grabOffset = {cursor.x - windowRect.left,
                         cursor.y - windowRect.top};
+    drag_.lastAppliedOrigin = {windowRect.left, windowRect.top};
     drag_.maximizedRect = {windowRect.left, windowRect.top, windowRect.right,
                            windowRect.bottom};
     drag_.restoring = IsZoomed(target) != FALSE;
@@ -755,12 +786,24 @@ bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
         drag_ = DragState{};
         return false;
     }
+    SD_TRACE(L"begin drag target=%p cursor=(%ld,%ld) maximized=%d", target,
+             static_cast<long>(cursor.x), static_cast<long>(cursor.y),
+             drag_.restoring ? 1 : 0);
+    SetTimer(mainWindow_, kDragWatchdogTimer, kDragWatchdogIntervalMs,
+             nullptr);
     return true;
 }
 
 LRESULT SuperDragApp::HandleMouseHook(
     int code, WPARAM message, const MSLLHOOKSTRUCT* mouseInfo) {
     if (code < 0 || mouseInfo == nullptr) {
+        return CallNextHookEx(mouseHook_, code, message,
+                              reinterpret_cast<LPARAM>(mouseInfo));
+    }
+    // Ignore synthetic input from other tools so an injected stream cannot
+    // fight our drag state machine.
+    if ((mouseInfo->flags &
+         (LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED)) != 0) {
         return CallNextHookEx(mouseHook_, code, message,
                               reinterpret_cast<LPARAM>(mouseInfo));
     }
@@ -786,15 +829,30 @@ LRESULT SuperDragApp::HandleMouseHook(
         case WM_MOUSEMOVE:
             if (drag_.active) {
                 drag_.latestCursor = {mouseInfo->pt.x, mouseInfo->pt.y};
-                ScheduleDragUpdate();
+                if (IsDragPositionReady()) {
+                    // Apply immediately at input rate. The async request
+                    // never blocks this thread on a busy target, and the
+                    // per-target FIFO queue keeps positions ordered.
+                    MoveTargetToLatestCursor();
+                } else {
+                    ScheduleDragUpdate();
+                }
                 return 1;
             }
             break;
         case WM_LBUTTONUP:
             if (drag_.active) {
                 drag_.latestCursor = {mouseInfo->pt.x, mouseInfo->pt.y};
-                drag_.releasePending = true;
-                ScheduleDragUpdate();
+                if (IsDragPositionReady()) {
+                    MoveTargetToLatestCursor();
+                    SD_TRACE(L"end drag (button up) at (%ld,%ld)",
+                             static_cast<long>(mouseInfo->pt.x),
+                             static_cast<long>(mouseInfo->pt.y));
+                    EndDrag();
+                } else {
+                    drag_.releasePending = true;
+                    ScheduleDragUpdate();
+                }
                 return 1;
             }
             break;
@@ -830,6 +888,44 @@ void SuperDragApp::ScheduleDragUpdate() {
     if (!drag_.updatePending) {
         FailCurrentDrag(false);
     }
+}
+
+bool SuperDragApp::IsDragPositionReady() const noexcept {
+    return drag_.active && !drag_.beginPending && !drag_.restoring &&
+           !drag_.releasePending && !drag_.movementFailed;
+}
+
+void SuperDragApp::MoveTargetToLatestCursor() {
+    if (!IsWindow(drag_.target)) {
+        SD_TRACE(L"end drag: target window gone");
+        EndDrag();
+        return;
+    }
+    const Point origin =
+        ComputeDraggedOrigin(drag_.latestCursor, drag_.grabOffset);
+    if (origin.x == drag_.lastAppliedOrigin.x &&
+        origin.y == drag_.lastAppliedOrigin.y) {
+        return;
+    }
+    if (!SetWindowPos(drag_.target, nullptr, origin.x, origin.y, 0, 0,
+                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                          SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS |
+                          SWP_DEFERERASE)) {
+        SD_TRACE(L"SetWindowPos failed, error=%lu", GetLastError());
+        FailCurrentDrag(true);
+        return;
+    }
+    drag_.lastAppliedOrigin = origin;
+#ifdef SUPERDRAG_TRACE
+    const DWORD now = GetTickCount();
+    if (now - lastMoveTraceTick_ >= 100) {
+        lastMoveTraceTick_ = now;
+        SD_TRACE(L"move cursor=(%ld,%ld) origin=(%ld,%ld)",
+                 static_cast<long>(drag_.latestCursor.x),
+                 static_cast<long>(drag_.latestCursor.y),
+                 static_cast<long>(origin.x), static_cast<long>(origin.y));
+    }
+#endif
 }
 
 void SuperDragApp::ApplyLatestDragPosition() {
@@ -869,20 +965,19 @@ void SuperDragApp::ApplyLatestDragPosition() {
             drag_.startCursor, drag_.maximizedRect, restoredSize);
         drag_.grabOffset = {drag_.startCursor.x - restoredOrigin.x,
                             drag_.startCursor.y - restoredOrigin.y};
+        drag_.lastAppliedOrigin = restoredOrigin;
         drag_.restoring = false;
+        SD_TRACE(L"maximized window restored at (%ld,%ld)",
+                 static_cast<long>(restoredOrigin.x),
+                 static_cast<long>(restoredOrigin.y));
     }
 
-    const Point origin =
-        ComputeDraggedOrigin(drag_.latestCursor, drag_.grabOffset);
-    // A single synchronous request keeps target positions ordered. The hook
-    // only ever queues one update, so newer mouse coordinates are coalesced.
-    if (!SetWindowPos(drag_.target, nullptr, origin.x, origin.y, 0, 0,
-                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
-        FailCurrentDrag(true);
-        return;
-    }
+    MoveTargetToLatestCursor();
 
     if (drag_.releasePending) {
+        SD_TRACE(L"end drag (pending release) at (%ld,%ld)",
+                 static_cast<long>(drag_.latestCursor.x),
+                 static_cast<long>(drag_.latestCursor.y));
         EndDrag();
     }
 }
@@ -890,11 +985,13 @@ void SuperDragApp::ApplyLatestDragPosition() {
 void SuperDragApp::EndDrag() {
     if (mainWindow_ != nullptr) {
         KillTimer(mainWindow_, kRestoreTimer);
+        KillTimer(mainWindow_, kDragWatchdogTimer);
     }
     drag_ = DragState{};
 }
 
 void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint) {
+    SD_TRACE(L"drag failed, hint=%d", showPrivilegeHint ? 1 : 0);
     drag_.movementFailed = true;
     if (showPrivilegeHint && mainWindow_ != nullptr) {
         PostMessageW(mainWindow_, kMessagePrivilegeHint, 0, 0);
