@@ -13,6 +13,9 @@ target_include_directories(superdrag_core PUBLIC src)
 
 if(MSVC)
     target_compile_options(superdrag_core PRIVATE /W4 /permissive- /utf-8)
+    set_property(TARGET superdrag_core PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
 else()
     target_compile_options(superdrag_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
@@ -24,7 +27,9 @@ if(WIN32)
         src/main.cpp
         src/app.cpp
         src/settings_store.cpp
+        src/ui_theme.cpp
         src/superdrag.rc
+        src/superdrag.manifest
     )
     target_include_directories(SuperDrag PRIVATE src)
     target_compile_definitions(SuperDrag PRIVATE

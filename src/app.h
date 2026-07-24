@@ -1,10 +1,12 @@
 #pragma once
 
 #include "core.h"
+#include "ui_theme.h"
 
 #include <windows.h>
 
 #include <cstdint>
+#include <memory>
 #include <string>
 
 namespace superdrag {
@@ -78,11 +80,12 @@ class SuperDragApp {
     void ShowPrivilegeHintOnce();
 
     void ShowSettingsWindow();
+    void ApplyThemeToSettingsWindow();
     void LoadSettingsIntoControls();
     void CreateSettingsControls();
     void LayoutSettingsControls(UINT dpi);
     void RecreateSettingsFont(UINT dpi);
-    void SetSettingsStatus(const std::wstring& text);
+    void SetSettingsStatus(const std::wstring& text, bool is_error = false);
     void SaveSettingsFromControls();
     bool CommitSettings(const UserSettings& requested, bool startupEnabled,
                         std::wstring* error);
@@ -98,6 +101,8 @@ class SuperDragApp {
     UINT taskbarCreatedMessage_ = 0;
     DWORD ownIntegrityLevel_ = 0;
     UserSettings settings_{};
+    std::unique_ptr<ui::UiTheme> theme_;
+    bool settingsStatusError_ = false;
     DragState drag_{};
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;

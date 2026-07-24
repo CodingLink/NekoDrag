@@ -1,6 +1,8 @@
 #include <windows.h>
+#include "resource.h"
 
-1 RT_MANIFEST "superdrag.manifest"
+IDI_APPICON ICON "assets/app.ico"
+IDI_TRAYICON ICON "assets/tray.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 0,1,0,0

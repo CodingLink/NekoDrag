@@ -1,6 +1,9 @@
 #include "app.h"
 
+#include "layout.h"
+#include "resource.h"
 #include "settings_store.h"
+#include "ui_theme.h"
 
 #include <commctrl.h>
 #include <dwmapi.h>
@@ -48,10 +51,6 @@ constexpr int kControlModifierGroup = 1010;
 constexpr int kControlHelp = 1011;
 
 SuperDragApp* gApp = nullptr;
-
-int Scale(int value, UINT dpi) {
-    return MulDiv(value, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
-}
 
 std::wstring ErrorWithCode(const wchar_t* message, DWORD errorCode) {
     std::wstring result(message);
@@ -131,13 +130,20 @@ bool IsExcludedWindowClass(HWND window) {
 }
 
 void SetCheckbox(HWND parent, int controlId, bool checked) {
-    SendDlgItemMessageW(parent, controlId, BM_SETCHECK,
-                        checked ? BST_CHECKED : BST_UNCHECKED, 0);
+    HWND control = GetDlgItem(parent, controlId);
+    if (control == nullptr) {
+        return;
+    }
+    SetWindowLongPtrW(control, GWLP_USERDATA,
+                      checked ? BST_CHECKED : BST_UNCHECKED);
+    InvalidateRect(control, nullptr, FALSE);
+    UpdateWindow(control);
 }
 
 bool IsCheckboxChecked(HWND parent, int controlId) {
-    return SendDlgItemMessageW(parent, controlId, BM_GETCHECK, 0, 0) ==
-           BST_CHECKED;
+    HWND control = GetDlgItem(parent, controlId);
+    return control != nullptr &&
+           GetWindowLongPtrW(control, GWLP_USERDATA) == BST_CHECKED;
 }
 
 }  // namespace
@@ -263,7 +269,7 @@ bool SuperDragApp::RegisterWindowClasses(std::wstring* error) {
     mainClass.cbSize = sizeof(mainClass);
     mainClass.lpfnWndProc = MainWindowProc;
     mainClass.hInstance = instance_;
-    mainClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    mainClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APPICON));
     mainClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     mainClass.lpszClassName = kMainWindowClass;
     if (RegisterClassExW(&mainClass) == 0) {
@@ -275,10 +281,9 @@ bool SuperDragApp::RegisterWindowClasses(std::wstring* error) {
     settingsClass.cbSize = sizeof(settingsClass);
     settingsClass.lpfnWndProc = SettingsWindowProc;
     settingsClass.hInstance = instance_;
-    settingsClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    settingsClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APPICON));
     settingsClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
-    settingsClass.hbrBackground = reinterpret_cast<HBRUSH>(
-        static_cast<INT_PTR>(COLOR_WINDOW + 1));
+    settingsClass.hbrBackground = nullptr;
     settingsClass.lpszClassName = kSettingsWindowClass;
     if (RegisterClassExW(&settingsClass) == 0) {
         *error = ErrorWithCode(L"注册设置窗口失败", GetLastError());
@@ -304,8 +309,13 @@ bool SuperDragApp::CreateSettingsWindow(std::wstring* error) {
     }
 
     const UINT dpi = GetDpiForSystem();
-    RECT windowRect{0, 0, Scale(450, dpi), Scale(300, dpi)};
-    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU;
+    const int client_width = ui::SettingsLayout::Scale(
+        ui::SettingsLayout::kMinClientWidth, dpi);
+    const int client_height = ui::SettingsLayout::Scale(
+        ui::SettingsLayout::kMinClientHeight, dpi);
+    RECT windowRect{0, 0, client_width, client_height};
+    const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+                        WS_THICKFRAME | WS_CLIPCHILDREN;
     const DWORD extendedStyle = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
     AdjustWindowRectExForDpi(&windowRect, style, FALSE, extendedStyle, dpi);
 
@@ -415,7 +425,7 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                 POINT point{};
                 GetCursorPos(&point);
                 ShowTrayMenu(point);
-            } else if (event == WM_LBUTTONDBLCLK) {
+            } else if (event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK) {
                 ShowSettingsWindow();
             }
             return 0;
@@ -461,24 +471,143 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
                                         WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
+            theme_ = std::make_unique<ui::UiTheme>();
             CreateSettingsControls();
             LayoutSettingsControls(GetDpiForWindow(window));
+            ApplyThemeToSettingsWindow();
             return 0;
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
-                case kControlSave:
-                    SaveSettingsFromControls();
-                    return 0;
-                case kControlCancel:
-                    ShowWindow(window, SW_HIDE);
-                    return 0;
-                default:
-                    break;
+        case WM_COMMAND: {
+            const int id = LOWORD(wParam);
+            const int code = HIWORD(wParam);
+            if (code == BN_CLICKED) {
+                switch (id) {
+                    case kControlEnabled:
+                    case kControlWin:
+                    case kControlControl:
+                    case kControlAlt:
+                    case kControlShift:
+                    case kControlStartup: {
+                        SetCheckbox(window, id,
+                                    !IsCheckboxChecked(window, id));
+                        return 0;
+                    }
+                    case kControlSave:
+                        SaveSettingsFromControls();
+                        return 0;
+                    case kControlCancel:
+                        ShowWindow(window, SW_HIDE);
+                        return 0;
+                    default:
+                        break;
+                }
+            }
+            break;
+        }
+        case WM_KEYDOWN:
+            if (wParam == VK_RETURN) {
+                SendDlgItemMessageW(window, kControlSave, BM_CLICK, 0, 0);
+                return 0;
+            }
+            if (wParam == VK_ESCAPE) {
+                ShowWindow(window, SW_HIDE);
+                return 0;
             }
             break;
         case WM_CLOSE:
             ShowWindow(window, SW_HIDE);
             return 0;
+        case WM_ERASEBKGND: {
+            if (theme_ != nullptr) {
+                RECT clientRect{};
+                GetClientRect(window, &clientRect);
+                FillRect(reinterpret_cast<HDC>(wParam), &clientRect,
+                         theme_->BackgroundBrush());
+                return TRUE;
+            }
+            break;
+        }
+        case WM_CTLCOLORSTATIC:
+        case WM_CTLCOLORBTN:
+            if (theme_ != nullptr) {
+                HDC hdc = reinterpret_cast<HDC>(wParam);
+                const HWND control = reinterpret_cast<HWND>(lParam);
+                const int control_id = GetDlgCtrlID(control);
+                if (control_id == kControlStatus && settingsStatusError_) {
+                    SetTextColor(hdc, theme_->ErrorColor());
+                } else if (control_id == kControlHelp) {
+                    SetTextColor(hdc, theme_->SecondaryTextColor());
+                } else {
+                    SetTextColor(hdc, theme_->TextColor());
+                }
+                SetBkMode(hdc, TRANSPARENT);
+                return reinterpret_cast<LRESULT>(theme_->BackgroundBrush());
+            }
+            break;
+        case WM_DRAWITEM: {
+            const auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
+            switch (dis->CtlID) {
+                case kControlEnabled:
+                case kControlWin:
+                case kControlControl:
+                case kControlAlt:
+                case kControlShift:
+                case kControlStartup: {
+                    DRAWITEMSTRUCT checkbox_state = *dis;
+                    if (IsCheckboxChecked(window,
+                                          static_cast<int>(dis->CtlID))) {
+                        checkbox_state.itemState |= ODS_CHECKED;
+                    } else {
+                        checkbox_state.itemState &= ~ODS_CHECKED;
+                    }
+                    const bool on_surface =
+                        dis->CtlID == kControlWin ||
+                        dis->CtlID == kControlControl ||
+                        dis->CtlID == kControlAlt ||
+                        dis->CtlID == kControlShift;
+                    ui::DrawThemedCheckbox(&checkbox_state, *theme_,
+                                           on_surface);
+                    return TRUE;
+                }
+                case kControlModifierGroup:
+                    ui::DrawThemedGroupBox(dis, *theme_);
+                    return TRUE;
+                case kControlSave:
+                case kControlCancel:
+                    if (dis->CtlID == kControlSave) {
+                        DRAWITEMSTRUCT dis_copy = *dis;
+                        dis_copy.itemState |= ODS_DEFAULT;
+                        ui::DrawThemedPushButton(&dis_copy, *theme_);
+                    } else {
+                        ui::DrawThemedPushButton(dis, *theme_);
+                    }
+                    return TRUE;
+                default:
+                    break;
+            }
+            break;
+        }
+        case WM_SIZE:
+            if (theme_ != nullptr && wParam != SIZE_MINIMIZED) {
+                LayoutSettingsControls(GetDpiForWindow(window));
+            }
+            return 0;
+        case WM_GETMINMAXINFO: {
+            auto* info = reinterpret_cast<MINMAXINFO*>(lParam);
+            const UINT dpi = GetDpiForWindow(window);
+            const int minClientWidth = ui::SettingsLayout::Scale(
+                ui::SettingsLayout::kMinClientWidth, dpi);
+            const int minClientHeight = ui::SettingsLayout::Scale(
+                ui::SettingsLayout::kMinClientHeight, dpi);
+            RECT rect{0, 0, minClientWidth, minClientHeight};
+            const DWORD style = static_cast<DWORD>(
+                GetWindowLongPtrW(window, GWL_STYLE));
+            const DWORD extendedStyle = static_cast<DWORD>(
+                GetWindowLongPtrW(window, GWL_EXSTYLE));
+            AdjustWindowRectExForDpi(&rect, style, FALSE, extendedStyle, dpi);
+            info->ptMinTrackSize.x = rect.right - rect.left;
+            info->ptMinTrackSize.y = rect.bottom - rect.top;
+            return 0;
+        }
         case WM_DPICHANGED: {
             const auto* suggested = reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(window, nullptr, suggested->left, suggested->top,
@@ -488,7 +617,22 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
             LayoutSettingsControls(HIWORD(wParam));
             return 0;
         }
+        case WM_SETTINGCHANGE:
+            if (theme_ != nullptr && lParam != 0 &&
+                wcscmp(reinterpret_cast<LPCWSTR>(lParam),
+                       L"ImmersiveColorSet") == 0) {
+                theme_->Refresh();
+                ApplyThemeToSettingsWindow();
+            }
+            return 0;
+        case WM_THEMECHANGED:
+            if (theme_ != nullptr) {
+                theme_->Refresh();
+                ApplyThemeToSettingsWindow();
+            }
+            return 0;
         case WM_NCDESTROY:
+            theme_.reset();
             settingsWindow_ = nullptr;
             return DefWindowProcW(window, message, wParam, lParam);
         default:
@@ -730,9 +874,10 @@ void SuperDragApp::ApplyLatestDragPosition() {
 
     const Point origin =
         ComputeDraggedOrigin(drag_.latestCursor, drag_.grabOffset);
+    // A single synchronous request keeps target positions ordered. The hook
+    // only ever queues one update, so newer mouse coordinates are coalesced.
     if (!SetWindowPos(drag_.target, nullptr, origin.x, origin.y, 0, 0,
-                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
-                          SWP_ASYNCWINDOWPOS)) {
+                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE)) {
         FailCurrentDrag(true);
         return;
     }
@@ -763,20 +908,32 @@ bool SuperDragApp::AddTrayIcon() {
     if (mainWindow_ == nullptr) {
         return false;
     }
-    NOTIFYICONDATAW icon{};
-    icon.cbSize = sizeof(icon);
-    icon.hWnd = mainWindow_;
-    icon.uID = kTrayIconId;
-    icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
-    icon.uCallbackMessage = kMessageTray;
-    icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
-    wcscpy_s(icon.szTip, L"SuperDrag");
-    if (!Shell_NotifyIconW(NIM_ADD, &icon)) {
+
+    const UINT dpi = GetDpiForWindow(mainWindow_);
+    const int icon_size = MulDiv(16, static_cast<int>(dpi), USER_DEFAULT_SCREEN_DPI);
+    HICON icon = static_cast<HICON>(LoadImageW(
+        instance_, MAKEINTRESOURCEW(IDI_TRAYICON), IMAGE_ICON, icon_size,
+        icon_size, LR_DEFAULTCOLOR));
+    if (icon == nullptr) {
+        icon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APPICON));
+    }
+
+    NOTIFYICONDATAW iconData{};
+    iconData.cbSize = sizeof(iconData);
+    iconData.hWnd = mainWindow_;
+    iconData.uID = kTrayIconId;
+    iconData.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
+    iconData.uCallbackMessage = kMessageTray;
+    iconData.hIcon = icon;
+    wcscpy_s(iconData.szTip, L"SuperDrag");
+    if (!Shell_NotifyIconW(NIM_ADD, &iconData)) {
+        DestroyIcon(icon);
         return false;
     }
-    icon.uVersion = NOTIFYICON_VERSION_4;
-    Shell_NotifyIconW(NIM_SETVERSION, &icon);
+    iconData.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &iconData);
     trayIconAdded_ = true;
+    DestroyIcon(icon);
     return true;
 }
 
@@ -877,6 +1034,21 @@ void SuperDragApp::ShowSettingsWindow() {
     SetForegroundWindow(settingsWindow_);
 }
 
+void SuperDragApp::ApplyThemeToSettingsWindow() {
+    if (settingsWindow_ == nullptr || theme_ == nullptr) {
+        return;
+    }
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+    constexpr DWORD DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+#endif
+    const BOOL dark = theme_->IsDark() ? TRUE : FALSE;
+    DwmSetWindowAttribute(settingsWindow_, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark,
+                          sizeof(dark));
+    RedrawWindow(settingsWindow_, nullptr, nullptr,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW |
+                     RDW_ALLCHILDREN);
+}
+
 void SuperDragApp::CreateSettingsControls() {
     auto create = [this](DWORD extendedStyle, const wchar_t* className,
                          const wchar_t* text, DWORD style, int id) {
@@ -887,59 +1059,85 @@ void SuperDragApp::CreateSettingsControls() {
             nullptr);
     };
 
-    create(0, L"BUTTON", L"启用窗口拖动", BS_AUTOCHECKBOX | WS_TABSTOP,
-           kControlEnabled);
-    create(0, L"BUTTON", L"启动快捷键（选择 1 至 3 个）", BS_GROUPBOX,
-           kControlModifierGroup);
-    create(0, L"BUTTON", L"Win", BS_AUTOCHECKBOX | WS_TABSTOP,
-           kControlWin);
-    create(0, L"BUTTON", L"Ctrl", BS_AUTOCHECKBOX | WS_TABSTOP,
-           kControlControl);
-    create(0, L"BUTTON", L"Alt", BS_AUTOCHECKBOX | WS_TABSTOP,
-           kControlAlt);
-    create(0, L"BUTTON", L"Shift", BS_AUTOCHECKBOX | WS_TABSTOP,
-           kControlShift);
-    create(0, L"BUTTON", L"登录 Windows 时自动启动",
-           BS_AUTOCHECKBOX | WS_TABSTOP, kControlStartup);
+    create(0, L"BUTTON", L"启用窗口拖动(&E)",
+           BS_OWNERDRAW | WS_TABSTOP, kControlEnabled);
+    // The group overlaps its checkbox siblings, so it must not behave like a
+    // button or paint into their rectangles.
+    create(0, L"STATIC", L"启动快捷键（选择 1 至 3 个）",
+           SS_OWNERDRAW | WS_CLIPSIBLINGS, kControlModifierGroup);
+    create(0, L"BUTTON", L"Win(&W)",
+           BS_OWNERDRAW | WS_TABSTOP, kControlWin);
+    create(0, L"BUTTON", L"Ctrl(&C)",
+           BS_OWNERDRAW | WS_TABSTOP, kControlControl);
+    create(0, L"BUTTON", L"Alt(&A)",
+           BS_OWNERDRAW | WS_TABSTOP, kControlAlt);
+    create(0, L"BUTTON", L"Shi&ft",
+           BS_OWNERDRAW | WS_TABSTOP, kControlShift);
+    create(0, L"BUTTON", L"登录 Windows 时自动启动(&U)",
+           BS_OWNERDRAW | WS_TABSTOP, kControlStartup);
     create(0, L"STATIC",
            L"按住所选修饰键并按下鼠标左键即可拖动。拖动开始后可以松开修饰键。",
            SS_LEFT, kControlHelp);
     create(0, L"STATIC", L"", SS_LEFT, kControlStatus);
-    create(0, L"BUTTON", L"保存", BS_DEFPUSHBUTTON | WS_TABSTOP,
-           kControlSave);
-    create(0, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP,
-           kControlCancel);
+    create(0, L"BUTTON", L"保存(&S)",
+           BS_OWNERDRAW | BS_DEFPUSHBUTTON | WS_TABSTOP, kControlSave);
+    create(0, L"BUTTON", L"取消(&X)",
+           BS_OWNERDRAW | BS_PUSHBUTTON | WS_TABSTOP, kControlCancel);
 }
 
 void SuperDragApp::LayoutSettingsControls(UINT dpi) {
     if (settingsWindow_ == nullptr) {
         return;
     }
-    HFONT previousFont = settingsFont_;
+
+    RECT clientRect{};
+    GetClientRect(settingsWindow_, &clientRect);
+    const int client_width = clientRect.right;
+    const int client_height = clientRect.bottom;
+
+    HFONT previous_font = settingsFont_;
     settingsFont_ = nullptr;
     RecreateSettingsFont(dpi);
 
-    auto move = [this, dpi](int id, int x, int y, int width, int height) {
+    using Layout = ui::SettingsLayout;
+
+    HDWP dwp = BeginDeferWindowPos(11);
+    auto move = [&](int id, const RECT& rc) {
         HWND control = GetDlgItem(settingsWindow_, id);
-        MoveWindow(control, Scale(x, dpi), Scale(y, dpi), Scale(width, dpi),
-                   Scale(height, dpi), TRUE);
+        DeferWindowPos(dwp, control, nullptr, rc.left, rc.top,
+                       rc.right - rc.left, rc.bottom - rc.top,
+                       SWP_NOZORDER | SWP_NOACTIVATE);
         SendMessageW(control, WM_SETFONT,
                      reinterpret_cast<WPARAM>(settingsFont_), TRUE);
     };
 
-    move(kControlEnabled, 22, 16, 200, 24);
-    move(kControlModifierGroup, 16, 48, 418, 82);
-    move(kControlWin, 32, 78, 72, 24);
-    move(kControlControl, 118, 78, 72, 24);
-    move(kControlAlt, 204, 78, 72, 24);
-    move(kControlShift, 290, 78, 90, 24);
-    move(kControlStartup, 22, 145, 260, 24);
-    move(kControlHelp, 22, 179, 406, 38);
-    move(kControlStatus, 22, 218, 406, 32);
-    move(kControlSave, 264, 258, 76, 28);
-    move(kControlCancel, 352, 258, 76, 28);
-    if (previousFont != nullptr) {
-        DeleteObject(previousFont);
+    move(kControlEnabled, Layout::EnabledCheckbox(dpi));
+    const RECT group_rc = Layout::ModifierGroup(dpi, client_width);
+    move(kControlModifierGroup, group_rc);
+    move(kControlWin,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 0));
+    move(kControlControl,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 1));
+    move(kControlAlt,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 2));
+    move(kControlShift,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 3));
+    const RECT startup_rc = Layout::StartupCheckbox(dpi, group_rc.bottom);
+    move(kControlStartup, startup_rc);
+    const RECT help_rc =
+        Layout::HelpLabel(dpi, client_width, startup_rc.bottom);
+    move(kControlHelp, help_rc);
+    move(kControlStatus,
+         Layout::StatusLabel(dpi, client_width, help_rc.bottom));
+    move(kControlSave,
+         Layout::SaveButton(dpi, client_width, client_height));
+    move(kControlCancel,
+         Layout::CancelButton(dpi, client_width, client_height));
+
+    EndDeferWindowPos(dwp);
+
+    if (previous_font != nullptr) {
+        DeleteObject(previous_font);
     }
 }
 
@@ -964,16 +1162,21 @@ void SuperDragApp::LoadSettingsIntoControls() {
     bool startupEnabled = false;
     std::wstring error;
     if (!QueryStartupEnabled(&startupEnabled, nullptr, &error)) {
-        SetSettingsStatus(error);
+        SetSettingsStatus(error, true);
     } else {
-        SetSettingsStatus(L"");
+        SetSettingsStatus(L"", false);
     }
     SetCheckbox(settingsWindow_, kControlStartup, startupEnabled);
 }
 
-void SuperDragApp::SetSettingsStatus(const std::wstring& text) {
+void SuperDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
+    settingsStatusError_ = is_error;
     if (settingsWindow_ != nullptr) {
         SetDlgItemTextW(settingsWindow_, kControlStatus, text.c_str());
+        HWND status = GetDlgItem(settingsWindow_, kControlStatus);
+        if (status != nullptr) {
+            InvalidateRect(status, nullptr, TRUE);
+        }
     }
 }
 
@@ -996,7 +1199,7 @@ void SuperDragApp::SaveSettingsFromControls() {
     }
 
     if (!IsValidModifierMask(requested.modifierMask)) {
-        SetSettingsStatus(L"请选择 1 至 3 个修饰键。");
+        SetSettingsStatus(L"请选择 1 至 3 个修饰键。", true);
         return;
     }
 
@@ -1004,7 +1207,7 @@ void SuperDragApp::SaveSettingsFromControls() {
         IsCheckboxChecked(settingsWindow_, kControlStartup);
     std::wstring error;
     if (!CommitSettings(requested, startupEnabled, &error)) {
-        SetSettingsStatus(error);
+        SetSettingsStatus(error, true);
         return;
     }
     ShowWindow(settingsWindow_, SW_HIDE);
