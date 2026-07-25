@@ -54,7 +54,7 @@ void TestSingleRequestAndBusyRejection(TestContext context) {
                                 [&entered]() { return entered; }));
     }
     Expect(context,
-           !worker.Submit({2, target, {30, 40}, VK_LBUTTON}));
+           !worker.Submit({2, target, {30, 40}}));
     {
         std::lock_guard<std::mutex> lock(mutex);
         release = true;
