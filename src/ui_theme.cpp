@@ -6,7 +6,7 @@
 
 #include <string>
 
-namespace superdrag::ui {
+namespace nekodrag::ui {
 namespace {
 
 // Windows 10 1809+ attribute for dark title bar.
@@ -548,4 +548,4 @@ void DrawThemedGroupBox(const DRAWITEMSTRUCT* dis, const UiTheme& theme) {
     }
 }
 
-}  // namespace superdrag::ui
+}  // namespace nekodrag::ui

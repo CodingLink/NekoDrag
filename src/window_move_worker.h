@@ -9,7 +9,7 @@
 #include <memory>
 #include <thread>
 
-namespace superdrag {
+namespace nekodrag {
 
 // Serializes cross-process window moves away from the low-level hook thread.
 // At most one request waits behind the in-flight call; newer coordinates
@@ -61,4 +61,4 @@ class WindowMoveWorker {
     std::thread thread_;
 };
 
-}  // namespace superdrag
+}  // namespace nekodrag

@@ -11,6 +11,6 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int showCommand) {
     controls.dwICC = ICC_STANDARD_CLASSES;
     InitCommonControlsEx(&controls);
 
-    superdrag::SuperDragApp app(instance);
+    nekodrag::NekoDragApp app(instance);
     return app.Run(showCommand);
 }

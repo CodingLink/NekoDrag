@@ -6,7 +6,7 @@
 #include <optional>
 #include <utility>
 
-namespace superdrag {
+namespace nekodrag {
 
 struct WindowMoveWorker::State {
     std::mutex mutex;
@@ -252,4 +252,4 @@ void WindowMoveWorker::Run(const std::shared_ptr<State>& state) {
     state->resultReady.notify_all();
 }
 
-}  // namespace superdrag
+}  // namespace nekodrag

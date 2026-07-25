@@ -22,7 +22,7 @@ void Expect(TestContext context, bool condition) {
 }
 
 void TestSingleRequestAndBusyRejection(TestContext context) {
-    using superdrag::NativeMoveWorker;
+    using nekodrag::NativeMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -71,7 +71,7 @@ void TestSingleRequestAndBusyRejection(TestContext context) {
 }
 
 void TestFailureAndGenerationArePreserved(TestContext context) {
-    using superdrag::NativeMoveWorker;
+    using nekodrag::NativeMoveWorker;
 
     NativeMoveWorker worker(
         nullptr, 0, [](const NativeMoveWorker::Request&) {
@@ -94,7 +94,7 @@ void TestFailureAndGenerationArePreserved(TestContext context) {
 }
 
 void TestStopAcceptingRejectsNewRequests(TestContext context) {
-    using superdrag::NativeMoveWorker;
+    using nekodrag::NativeMoveWorker;
 
     NativeMoveWorker worker(
         nullptr, 0, [](const NativeMoveWorker::Request&) {
@@ -108,7 +108,7 @@ void TestStopAcceptingRejectsNewRequests(TestContext context) {
 }
 
 void TestNewGenerationReplacesStaleResult(TestContext context) {
-    using superdrag::NativeMoveWorker;
+    using nekodrag::NativeMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -167,7 +167,7 @@ void TestNewGenerationReplacesStaleResult(TestContext context) {
 }
 
 void TestBlockedRequestHasBoundedStop(TestContext context) {
-    using superdrag::NativeMoveWorker;
+    using nekodrag::NativeMoveWorker;
 
     struct SharedBlock {
         std::mutex mutex;

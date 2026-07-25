@@ -4,7 +4,7 @@
 
 #include <vector>
 
-namespace superdrag::ui {
+namespace nekodrag::ui {
 
 // Provides theme colors/brushes and detects Windows light/dark/high-contrast
 // modes. All custom colors are bypassed when a high-contrast theme is active.
@@ -52,4 +52,4 @@ void DrawThemedRadioButton(const DRAWITEMSTRUCT* dis, const UiTheme& theme,
                            bool onSurface);
 void DrawThemedGroupBox(const DRAWITEMSTRUCT* dis, const UiTheme& theme);
 
-}  // namespace superdrag::ui
+}  // namespace nekodrag::ui

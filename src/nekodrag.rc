@@ -21,12 +21,12 @@ BEGIN
     BEGIN
         BLOCK "040904B0"
         BEGIN
-            VALUE "CompanyName", "SuperDrag"
-            VALUE "FileDescription", "SuperDrag Window Utility"
+            VALUE "CompanyName", "NekoDrag"
+            VALUE "FileDescription", "NekoDrag Window Utility"
             VALUE "FileVersion", "0.1.0"
-            VALUE "InternalName", "SuperDrag"
-            VALUE "OriginalFilename", "SuperDrag.exe"
-            VALUE "ProductName", "SuperDrag"
+            VALUE "InternalName", "NekoDrag"
+            VALUE "OriginalFilename", "NekoDrag.exe"
+            VALUE "ProductName", "NekoDrag"
             VALUE "ProductVersion", "0.1.0"
         END
     END

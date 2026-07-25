@@ -1,10 +1,10 @@
-# SuperDrag 项目技术概述
+# NekoDrag 项目技术概述
 
 > 本说明基于当前工作区，而不是仅基于 Git HEAD。
 
 ## 1. 项目定位
 
-SuperDrag 是一个原生 C++17/Win32 Windows 10/11 x64 托盘程序。
+NekoDrag 是一个原生 C++17/Win32 Windows 10/11 x64 托盘程序。
 
 核心功能：
 
@@ -31,20 +31,22 @@ SuperDrag 是一个原生 C++17/Win32 Windows 10/11 x64 托盘程序。
 用户当前使用 Visual Studio 18：
 
 ```powershell
-cmake -S . -B build-vs18 -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON
-cmake --build build-vs18 --config Release --parallel
-ctest --test-dir build-vs18 -C Release --output-on-failure
+cmake -S . -B build-vs18-nekodrag -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON
+cmake --build build-vs18-nekodrag --config Release --parallel
+ctest --test-dir build-vs18-nekodrag -C Release --output-on-failure
 ```
 
-运行前应先退出托盘中的旧版 SuperDrag：
+仓库改名后不得复用含旧绝对路径的 CMake 缓存。运行前应先退出托盘中的旧版：
 
 ```powershell
-.\build-vs18\Release\SuperDrag.exe
+.\build-vs18-nekodrag\Release\NekoDrag.exe
 ```
 
-诊断拖动问题时可用 `-DSUPERDRAG_TRACE=ON` 构建。钩子安装、原生移动循环、
+诊断拖动问题时可用 `-DNEKODRAG_TRACE=ON` 构建。钩子安装、原生移动循环、
 兼容回退、耗时汇总及拖动结束原因通过 `OutputDebugString` 输出，可用 DebugView
 抓取。低级钩子回调不直接输出日志，也不记录每个鼠标移动事件。
+旧缓存变量 `SUPERDRAG_TRACE` 会被一次性映射为 `NEKODRAG_TRACE`，配置时显示弃用
+提示并从缓存删除；新脚本和文档不得继续使用旧名称。
 
 ## 3. 模块划分
 
@@ -52,15 +54,15 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 |---|---|
 | [main.cpp](../src/main.cpp) | `wWinMain`、DPI Awareness、Common Controls 初始化 |
 | [app.cpp](../src/app.cpp) | 生命周期、消息循环、鼠标钩子、拖动状态机、托盘、设置窗口 |
-| [app.h](../src/app.h) | `SuperDragApp` 和 `DragState` 定义 |
+| [app.h](../src/app.h) | `NekoDragApp` 和 `DragState` 定义 |
 | [native_move_worker.cpp](../src/native_move_worker.cpp) | 在独立线程运行目标窗口的原生标题栏移动循环 |
 | [window_move_worker.cpp](../src/window_move_worker.cpp) | 原生移动被拒绝时合并坐标并串行移动窗口 |
 | [core.cpp](../src/core.cpp) | 修饰键校验、拖动坐标计算、窗口候选过滤 |
 | [settings_store.cpp](../src/settings_store.cpp) | 注册表设置和开机启动 |
 | [layout.h](../src/layout.h) | 设置窗口的 96 DPI 逻辑布局 |
 | [ui_theme.cpp](../src/ui_theme.cpp) | 深浅色、高对比度及 owner-draw 控件绘制 |
-| [superdrag.rc](../src/superdrag.rc) | 图标和版本资源 |
-| [superdrag.manifest](../src/superdrag.manifest) | DPI、Common Controls v6、`asInvoker` 权限 |
+| [nekodrag.rc](../src/nekodrag.rc) | 图标和版本资源 |
+| [nekodrag.manifest](../src/nekodrag.manifest) | DPI、Common Controls v6、`asInvoker` 权限 |
 | [core_tests.cpp](../tests/core_tests.cpp) | 无第三方框架的核心 CTest |
 | [native_move_worker_tests.cpp](../tests/native_move_worker_tests.cpp) | 原生移动线程生命周期与错误路径 CTest |
 | [window_move_worker_tests.cpp](../tests/window_move_worker_tests.cpp) | Windows 移动线程并发与错误路径 CTest |
@@ -77,12 +79,13 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 
 ```text
 wWinMain
-  → 创建 Local\SuperDrag.SingleInstance 互斥量
-  → 加载 HKCU 设置
+  → 同时占用 NekoDrag 与 legacy SuperDrag 单实例互斥量
+  → 优先加载 HKCU\Software\NekoDrag；缺失时导入旧设置
   → 创建隐藏消息窗口
   → 启动原生移动和兼容回退工作线程
   → 监听 EVENT_SYSTEM_MOVESIZESTART/END
   → 添加托盘图标
+  → 将导入的旧设置写入新键（失败只警告）
   → 校准开机启动路径
   → Enabled=true 时投递 WH_MOUSE_LL 安装消息
   → 首次运行显示设置窗口
@@ -91,6 +94,8 @@ wWinMain
 ```
 
 第二实例通过 `FindWindow` 找到隐藏窗口，并投递打开设置消息，不创建第二个驻留进程。
+升级兼容检查还会检测旧窗口类和 `Local\SuperDrag.SingleInstance`；这些 legacy
+常量只用于避免新旧进程同时安装鼠标钩子。
 
 收到 Explorer 的 `TaskbarCreated` 消息后会重新添加托盘图标。
 
@@ -124,7 +129,7 @@ WH_MOUSE_LL
   阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
 - 初始左键按下被低级钩子吞掉后，`GetAsyncKeyState` 不会反映这次按下；
   原生工作线程会直接发送消息，拖动生命周期以钩子实际观察到的释放事件为准。
-- 原生循环开始后 SuperDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
+- 原生循环开始后 NekoDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
   跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
 - 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。
   状态机等待 100ms 排除 WinEvent 投递延迟；自动模式之后进入兼容
@@ -134,7 +139,7 @@ WH_MOUSE_LL
 - 每个请求和完成结果携带单调递增的 drag generation，旧拖动的迟到结果不会修改
   当前状态。`lastAppliedOrigin` 只在工作线程报告成功后更新。
 - 关闭时两个工作线程先拒绝请求并作废 generation；最多等待 250ms。阻塞线程只
-  保留共享内部状态，不持有 `SuperDragApp` 指针，可以安全 detach。
+  保留共享内部状态，不持有 `NekoDragApp` 指针，可以安全 detach。
 - 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时则替换原生工作线程。
   每次原生拖动结束都会重装低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
 - 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子
@@ -155,13 +160,13 @@ Windows 验证中这会让目标队列积压，表现为原地抖动或严重滞
 
 以下目标不会进入拖动：
 
-- SuperDrag 自身窗口。
+- NekoDrag 自身窗口。
 - 桌面、Shell、主/副任务栏。
 - 菜单窗口、工具提示。
 - 隐藏、禁用、最小化或已销毁窗口。
 - 子窗口、DWM cloaked 窗口。
 - `WS_EX_NOACTIVATE` 临时窗口。
-- 高于 SuperDrag 完整性等级的进程。
+- 高于 NekoDrag 完整性等级的进程。
 
 无法查询目标进程完整性时按受限窗口处理。管理员或受保护窗口不会触发 UAC，只显示一次托盘说明。
 
@@ -170,7 +175,7 @@ Windows 验证中这会让目标队列积压，表现为原地抖动或严重滞
 主设置位置：
 
 ```text
-HKCU\Software\SuperDrag
+HKCU\Software\NekoDrag
 ```
 
 值：
@@ -200,13 +205,22 @@ HKCU\Software\SuperDrag
 
 ```text
 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
-值名：SuperDrag
+值名：NekoDrag
 ```
 
 值内容是带双引号的当前 EXE 绝对路径。程序启动时会在开机启动已开启的情况下校准路径。
 
 设置保存会先快照五个原注册表值；任一写入失败时恢复已经写入的值。开机启动修改
 失败时也会恢复主设置，并在恢复本身失败时向用户报告。
+
+升级规则：
+
+- 新设置键存在时始终优先，不再读取旧键。
+- 新设置键缺失而 `HKCU\Software\SuperDrag` 存在时，读取旧值且不再显示首次运行页；
+  托盘初始化后写入新键，旧键保留以便回退。
+- 开机启动值名为 `NekoDrag`。发现旧 `SuperDrag` 值时先写入当前
+  `NekoDrag.exe` 的带引号绝对路径，再删除旧值；删除失败会恢复新值原状。
+- 关闭开机启动会同时清理新旧两个值名。
 
 ## 8. 设置窗口 UI
 
@@ -228,7 +242,12 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 ## 9. 资源和清单注意事项
 
-- 图标资源位于 `src/assets`，由 `superdrag.rc` 引用。
+- 图标资源位于 `src/assets`，由 `nekodrag.rc` 引用。
+- `scripts/generate_icons.py` 以 `assets/nekodrag.svg` 共用的 16×16 像素矩阵为
+  唯一母版，使用固定布偶猫调色板和最近邻映射生成 16/20/24/32/48/256px
+  应用图标及 16/20/24px 托盘图标；生成过程只依赖 Python 标准库。
+- SVG 使用透明背景与 `shape-rendering="crispEdges"`，不得用平均缩放替换生成器，
+  否则小尺寸托盘图标会产生模糊边缘。
 - Manifest 已作为 CMake 源文件交给 MSVC。
 - 不要再向 `.rc` 添加 `RT_MANIFEST`，否则会再次出现：
 

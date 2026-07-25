@@ -15,7 +15,7 @@ void Expect(bool condition, const char* description) {
 }
 
 void TestModifierValidation() {
-    using namespace superdrag;
+    using namespace nekodrag;
     const UserSettings defaults;
     Expect(defaults.enabled, "dragging is enabled by default");
     Expect(defaults.modifierMask == (kModifierWin | kModifierAlt),
@@ -43,7 +43,7 @@ void TestModifierValidation() {
 }
 
 void TestDragEngineRouting() {
-    using namespace superdrag;
+    using namespace nekodrag;
 
     Expect(IsValidDragEngineMode(0), "automatic drag mode is valid");
     Expect(IsValidDragEngineMode(1), "native-only drag mode is valid");
@@ -90,7 +90,7 @@ void TestDragEngineRouting() {
 }
 
 void TestPositionCalculations() {
-    using namespace superdrag;
+    using namespace nekodrag;
     const Point dragged = ComputeDraggedOrigin({250, 180}, {50, 30});
     Expect(dragged.x == 200 && dragged.y == 150,
            "normal drag preserves the grab offset");
@@ -112,7 +112,7 @@ void TestPositionCalculations() {
 }
 
 void TestWindowFiltering() {
-    using namespace superdrag;
+    using namespace nekodrag;
     WindowTraits valid;
     valid.exists = true;
     valid.visible = true;
@@ -139,8 +139,8 @@ void TestWindowFiltering() {
 }
 
 void TestNativeMoveCompletionDecision() {
-    using superdrag::DecideNativeMoveCompletion;
-    using superdrag::NativeMoveCompletionAction;
+    using nekodrag::DecideNativeMoveCompletion;
+    using nekodrag::NativeMoveCompletionAction;
 
     Expect(DecideNativeMoveCompletion(true, false, false) ==
                NativeMoveCompletionAction::Complete,
@@ -172,6 +172,6 @@ int main() {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
     }
-    std::cout << "All SuperDrag core tests passed\n";
+    std::cout << "All NekoDrag core tests passed\n";
     return EXIT_SUCCESS;
 }

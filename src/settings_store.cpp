@@ -7,13 +7,17 @@
 #include <string>
 #include <vector>
 
-namespace superdrag {
+namespace nekodrag {
 namespace {
 
-constexpr wchar_t kSettingsKey[] = L"Software\\SuperDrag";
+constexpr wchar_t kSettingsKey[] = L"Software\\NekoDrag";
 constexpr wchar_t kRunKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kRunValue[] = L"SuperDrag";
+constexpr wchar_t kRunValue[] = L"NekoDrag";
+
+// Legacy identifiers are retained only for one-way upgrade compatibility.
+constexpr wchar_t kLegacySettingsKey[] = L"Software\\SuperDrag";
+constexpr wchar_t kLegacyRunValue[] = L"SuperDrag";
 
 class RegistryKey {
   public:
@@ -29,6 +33,12 @@ class RegistryKey {
 
     HKEY* receive() noexcept { return &key_; }
     HKEY get() const noexcept { return key_; }
+    void close() noexcept {
+        if (key_ != nullptr) {
+            RegCloseKey(key_);
+            key_ = nullptr;
+        }
+    }
 
   private:
     HKEY key_ = nullptr;
@@ -106,6 +116,115 @@ bool RestoreDword(HKEY key, const wchar_t* name,
     return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
 
+struct StringSnapshot {
+    bool exists = false;
+    std::wstring value;
+};
+
+bool SnapshotString(HKEY key, const wchar_t* name, StringSnapshot* snapshot,
+                    std::wstring* error) {
+    *snapshot = StringSnapshot{};
+
+    DWORD type = 0;
+    DWORD size = 0;
+    LSTATUS status =
+        RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
+    if (status == ERROR_FILE_NOT_FOUND) {
+        return true;
+    }
+    if (status != ERROR_SUCCESS || type != REG_SZ) {
+        SetError(error, L"读取开机启动设置失败",
+                 status == ERROR_SUCCESS ? ERROR_INVALID_DATATYPE : status);
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
+    status = RegQueryValueExW(key, name, nullptr, &type,
+                              reinterpret_cast<BYTE*>(buffer.data()), &size);
+    if (status != ERROR_SUCCESS) {
+        SetError(error, L"读取开机启动设置失败", status);
+        return false;
+    }
+    snapshot->exists = true;
+    snapshot->value.assign(buffer.data());
+    return true;
+}
+
+bool ValueExists(HKEY key, const wchar_t* name, bool* exists,
+                 std::wstring* error) {
+    DWORD type = 0;
+    DWORD size = 0;
+    const LSTATUS status =
+        RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
+    if (status == ERROR_FILE_NOT_FOUND) {
+        *exists = false;
+        return true;
+    }
+    if (status != ERROR_SUCCESS) {
+        SetError(error, L"读取开机启动设置失败", status);
+        return false;
+    }
+    *exists = true;
+    return true;
+}
+
+LSTATUS WriteString(HKEY key, const wchar_t* name,
+                    const std::wstring& value) {
+    const DWORD size =
+        static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t));
+    return RegSetValueExW(key, name, 0, REG_SZ,
+                          reinterpret_cast<const BYTE*>(value.c_str()), size);
+}
+
+bool RestoreString(HKEY key, const wchar_t* name,
+                   const StringSnapshot& snapshot) {
+    if (snapshot.exists) {
+        return WriteString(key, name, snapshot.value) == ERROR_SUCCESS;
+    }
+    const LSTATUS status = RegDeleteValueW(key, name);
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+}
+
+bool LoadSettingsFromKey(const wchar_t* keyPath, UserSettings* settings,
+                         bool* keyExists, std::wstring* error) {
+    *keyExists = false;
+
+    RegistryKey key;
+    const LSTATUS openStatus = RegOpenKeyExW(
+        HKEY_CURRENT_USER, keyPath, 0, KEY_QUERY_VALUE, key.receive());
+    if (openStatus == ERROR_FILE_NOT_FOUND) {
+        return true;
+    }
+    if (openStatus != ERROR_SUCCESS) {
+        SetError(error, L"打开设置失败", openStatus);
+        return false;
+    }
+    *keyExists = true;
+
+    DWORD enabled = settings->enabled ? 1U : 0U;
+    DWORD modifierMask = settings->modifierMask;
+    DWORD dragMode = static_cast<DWORD>(settings->dragEngineMode);
+    DWORD firstRunCompleted = settings->firstRunCompleted ? 1U : 0U;
+    DWORD privilegeHintShown = settings->privilegeHintShown ? 1U : 0U;
+    if (!ReadDword(key.get(), L"Enabled", &enabled, error) ||
+        !ReadDword(key.get(), L"ModifierMask", &modifierMask, error) ||
+        !ReadDword(key.get(), L"DragMode", &dragMode, error) ||
+        !ReadDword(key.get(), L"FirstRunCompleted", &firstRunCompleted,
+                   error) ||
+        !ReadDword(key.get(), L"PrivilegeHintShown", &privilegeHintShown,
+                   error)) {
+        return false;
+    }
+
+    settings->enabled = enabled != 0;
+    settings->modifierMask =
+        IsValidModifierMask(modifierMask) ? modifierMask : kDefaultModifiers;
+    settings->dragEngineMode = NormalizeDragEngineMode(dragMode);
+    settings->firstRunCompleted = firstRunCompleted != 0;
+    settings->privilegeHintShown = privilegeHintShown != 0;
+    return true;
+}
+
 bool CurrentExecutablePath(std::wstring* path, std::wstring* error) {
     std::vector<wchar_t> buffer(512);
     for (;;) {
@@ -142,9 +261,9 @@ bool ExpectedStartupCommand(std::wstring* command, std::wstring* error) {
 
 }  // namespace
 
-bool LoadSettings(UserSettings* settings, bool* settingsKeyExists,
+bool LoadSettings(UserSettings* settings, SettingsLoadInfo* loadInfo,
                   std::wstring* error) {
-    if (settings == nullptr || settingsKeyExists == nullptr) {
+    if (settings == nullptr || loadInfo == nullptr) {
         if (error != nullptr) {
             *error = L"设置参数无效";
         }
@@ -152,41 +271,27 @@ bool LoadSettings(UserSettings* settings, bool* settingsKeyExists,
     }
 
     *settings = UserSettings{};
-    *settingsKeyExists = false;
+    *loadInfo = SettingsLoadInfo{};
 
-    RegistryKey key;
-    const LSTATUS openStatus = RegOpenKeyExW(
-        HKEY_CURRENT_USER, kSettingsKey, 0, KEY_QUERY_VALUE, key.receive());
-    if (openStatus == ERROR_FILE_NOT_FOUND) {
+    bool currentKeyExists = false;
+    if (!LoadSettingsFromKey(kSettingsKey, settings, &currentKeyExists,
+                             error)) {
+        return false;
+    }
+    if (currentKeyExists) {
+        loadInfo->settingsKeyExists = true;
         return true;
     }
-    if (openStatus != ERROR_SUCCESS) {
-        SetError(error, L"打开设置失败", openStatus);
+
+    bool legacyKeyExists = false;
+    if (!LoadSettingsFromKey(kLegacySettingsKey, settings, &legacyKeyExists,
+                             error)) {
         return false;
     }
-    *settingsKeyExists = true;
-
-    DWORD enabled = settings->enabled ? 1U : 0U;
-    DWORD modifierMask = settings->modifierMask;
-    DWORD dragMode = static_cast<DWORD>(settings->dragEngineMode);
-    DWORD firstRunCompleted = settings->firstRunCompleted ? 1U : 0U;
-    DWORD privilegeHintShown = settings->privilegeHintShown ? 1U : 0U;
-    if (!ReadDword(key.get(), L"Enabled", &enabled, error) ||
-        !ReadDword(key.get(), L"ModifierMask", &modifierMask, error) ||
-        !ReadDword(key.get(), L"DragMode", &dragMode, error) ||
-        !ReadDword(key.get(), L"FirstRunCompleted", &firstRunCompleted,
-                   error) ||
-        !ReadDword(key.get(), L"PrivilegeHintShown", &privilegeHintShown,
-                   error)) {
-        return false;
+    if (legacyKeyExists) {
+        loadInfo->settingsKeyExists = true;
+        loadInfo->importedLegacySettings = true;
     }
-
-    settings->enabled = enabled != 0;
-    settings->modifierMask =
-        IsValidModifierMask(modifierMask) ? modifierMask : kDefaultModifiers;
-    settings->dragEngineMode = NormalizeDragEngineMode(dragMode);
-    settings->firstRunCompleted = firstRunCompleted != 0;
-    settings->privilegeHintShown = privilegeHintShown != 0;
     return true;
 }
 
@@ -210,8 +315,7 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
     const LSTATUS createStatus = RegCreateKeyExW(
         HKEY_CURRENT_USER, kSettingsKey, 0, nullptr,
         REG_OPTION_NON_VOLATILE, KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr,
-        key.receive(),
-        &disposition);
+        key.receive(), &disposition);
     if (createStatus != ERROR_SUCCESS) {
         SetError(error, L"创建设置失败", createStatus);
         return false;
@@ -230,8 +334,21 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
         {L"PrivilegeHintShown", settings.privilegeHintShown ? 1U : 0U, {}},
     }};
 
+    const auto removeNewKeyAfterFailure = [&key, disposition]() {
+        if (disposition != REG_CREATED_NEW_KEY) {
+            return true;
+        }
+        key.close();
+        const LSTATUS status =
+            RegDeleteKeyW(HKEY_CURRENT_USER, kSettingsKey);
+        return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
+    };
+
     for (PendingDword& value : values) {
         if (!SnapshotDword(key.get(), value.name, &value.previous, error)) {
+            if (!removeNewKeyAfterFailure() && error != nullptr) {
+                error->append(L"；清理未完成的新设置键时也发生错误");
+            }
             return false;
         }
     }
@@ -253,6 +370,9 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
         }
         if (!rollbackSucceeded && error != nullptr) {
             error->append(L"；恢复原设置时也发生错误");
+        }
+        if (!removeNewKeyAfterFailure() && error != nullptr) {
+            error->append(L"；清理未完成的新设置键时也发生错误");
         }
         return false;
     }
@@ -283,29 +403,28 @@ bool QueryStartupEnabled(bool* enabled, std::wstring* command,
         return false;
     }
 
-    DWORD type = 0;
-    DWORD size = 0;
-    LSTATUS status = RegQueryValueExW(key.get(), kRunValue, nullptr, &type,
-                                      nullptr, &size);
-    if (status == ERROR_FILE_NOT_FOUND) {
+    StringSnapshot current;
+    if (!SnapshotString(key.get(), kRunValue, &current, error)) {
+        return false;
+    }
+    if (current.exists) {
+        *enabled = true;
+        if (command != nullptr) {
+            *command = current.value;
+        }
         return true;
     }
-    if (status != ERROR_SUCCESS || type != REG_SZ) {
-        SetError(error, L"读取开机启动设置失败",
-                 status == ERROR_SUCCESS ? ERROR_INVALID_DATATYPE : status);
+
+    StringSnapshot legacy;
+    if (!SnapshotString(key.get(), kLegacyRunValue, &legacy, error)) {
         return false;
     }
-
-    std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 1, L'\0');
-    status = RegQueryValueExW(key.get(), kRunValue, nullptr, &type,
-                              reinterpret_cast<BYTE*>(buffer.data()), &size);
-    if (status != ERROR_SUCCESS) {
-        SetError(error, L"读取开机启动设置失败", status);
-        return false;
+    if (!legacy.exists) {
+        return true;
     }
     *enabled = true;
     if (command != nullptr) {
-        command->assign(buffer.data());
+        *command = legacy.value;
     }
     return true;
 }
@@ -314,17 +433,24 @@ bool SetStartupEnabled(bool enabled, std::wstring* error) {
     RegistryKey key;
     const LSTATUS createStatus = RegCreateKeyExW(
         HKEY_CURRENT_USER, kRunKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
-        KEY_SET_VALUE, nullptr, key.receive(), nullptr);
+        KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr, key.receive(), nullptr);
     if (createStatus != ERROR_SUCCESS) {
         SetError(error, L"打开开机启动设置失败", createStatus);
         return false;
     }
 
     if (!enabled) {
-        const LSTATUS deleteStatus = RegDeleteValueW(key.get(), kRunValue);
-        if (deleteStatus != ERROR_SUCCESS &&
-            deleteStatus != ERROR_FILE_NOT_FOUND) {
-            SetError(error, L"关闭开机启动失败", deleteStatus);
+        const LSTATUS currentStatus = RegDeleteValueW(key.get(), kRunValue);
+        const LSTATUS legacyStatus =
+            RegDeleteValueW(key.get(), kLegacyRunValue);
+        if (currentStatus != ERROR_SUCCESS &&
+            currentStatus != ERROR_FILE_NOT_FOUND) {
+            SetError(error, L"关闭开机启动失败", currentStatus);
+            return false;
+        }
+        if (legacyStatus != ERROR_SUCCESS &&
+            legacyStatus != ERROR_FILE_NOT_FOUND) {
+            SetError(error, L"清理旧开机启动项失败", legacyStatus);
             return false;
         }
         return true;
@@ -334,24 +460,54 @@ bool SetStartupEnabled(bool enabled, std::wstring* error) {
     if (!ExpectedStartupCommand(&command, error)) {
         return false;
     }
-    const DWORD size = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
-    const LSTATUS status = RegSetValueExW(
-        key.get(), kRunValue, 0, REG_SZ,
-        reinterpret_cast<const BYTE*>(command.c_str()), size);
-    if (status != ERROR_SUCCESS) {
-        SetError(error, L"启用开机启动失败", status);
+
+    StringSnapshot previousCurrent;
+    if (!SnapshotString(key.get(), kRunValue, &previousCurrent, error)) {
+        return false;
+    }
+
+    const LSTATUS writeStatus = WriteString(key.get(), kRunValue, command);
+    if (writeStatus != ERROR_SUCCESS) {
+        SetError(error, L"启用开机启动失败", writeStatus);
+        return false;
+    }
+
+    const LSTATUS deleteStatus = RegDeleteValueW(key.get(), kLegacyRunValue);
+    if (deleteStatus != ERROR_SUCCESS &&
+        deleteStatus != ERROR_FILE_NOT_FOUND) {
+        const bool rollbackSucceeded =
+            RestoreString(key.get(), kRunValue, previousCurrent);
+        SetError(error, L"迁移旧开机启动项失败", deleteStatus);
+        if (!rollbackSucceeded && error != nullptr) {
+            error->append(L"；恢复 NekoDrag 启动项时也发生错误");
+        }
         return false;
     }
     return true;
 }
 
 bool ReconcileStartupPath(std::wstring* error) {
-    bool enabled = false;
-    std::wstring currentCommand;
-    if (!QueryStartupEnabled(&enabled, &currentCommand, error)) {
+    RegistryKey key;
+    const LSTATUS openStatus = RegOpenKeyExW(
+        HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, key.receive());
+    if (openStatus == ERROR_FILE_NOT_FOUND) {
+        return true;
+    }
+    if (openStatus != ERROR_SUCCESS) {
+        SetError(error, L"读取开机启动设置失败", openStatus);
         return false;
     }
-    if (!enabled) {
+
+    StringSnapshot current;
+    if (!SnapshotString(key.get(), kRunValue, &current, error)) {
+        return false;
+    }
+
+    bool legacyExists = false;
+    if (!ValueExists(key.get(), kLegacyRunValue, &legacyExists, error)) {
+        return false;
+    }
+    if (!current.exists && !legacyExists) {
         return true;
     }
 
@@ -359,10 +515,11 @@ bool ReconcileStartupPath(std::wstring* error) {
     if (!ExpectedStartupCommand(&expectedCommand, error)) {
         return false;
     }
-    if (_wcsicmp(currentCommand.c_str(), expectedCommand.c_str()) == 0) {
+    if (current.exists && !legacyExists &&
+        _wcsicmp(current.value.c_str(), expectedCommand.c_str()) == 0) {
         return true;
     }
     return SetStartupEnabled(true, error);
 }
 
-}  // namespace superdrag
+}  // namespace nekodrag

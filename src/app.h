@@ -13,15 +13,15 @@
 #include <memory>
 #include <string>
 
-namespace superdrag {
+namespace nekodrag {
 
-class SuperDragApp {
+class NekoDragApp {
   public:
-    explicit SuperDragApp(HINSTANCE instance) noexcept;
-    ~SuperDragApp();
+    explicit NekoDragApp(HINSTANCE instance) noexcept;
+    ~NekoDragApp();
 
-    SuperDragApp(const SuperDragApp&) = delete;
-    SuperDragApp& operator=(const SuperDragApp&) = delete;
+    NekoDragApp(const NekoDragApp&) = delete;
+    NekoDragApp& operator=(const NekoDragApp&) = delete;
 
     int Run(int showCommand);
     LRESULT HandleMouseHook(int code, WPARAM message,
@@ -160,6 +160,7 @@ class SuperDragApp {
 
     HINSTANCE instance_ = nullptr;
     HANDLE instanceMutex_ = nullptr;
+    HANDLE legacyInstanceMutex_ = nullptr;
     HWND mainWindow_ = nullptr;
     HWND settingsWindow_ = nullptr;
     HHOOK mouseHook_ = nullptr;
@@ -188,4 +189,4 @@ class SuperDragApp {
     bool shuttingDown_ = false;
 };
 
-}  // namespace superdrag
+}  // namespace nekodrag

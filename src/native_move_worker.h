@@ -9,7 +9,7 @@
 #include <memory>
 #include <thread>
 
-namespace superdrag {
+namespace nekodrag {
 
 // Runs the target window's native caption move loop away from the low-level
 // mouse hook thread. A successful call remains in flight until the target's
@@ -57,4 +57,4 @@ class NativeMoveWorker {
     std::thread thread_;
 };
 
-}  // namespace superdrag
+}  // namespace nekodrag

@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdint>
 
-namespace superdrag {
+namespace nekodrag {
 namespace {
 
 unsigned CountBits(std::uint32_t value) noexcept {
@@ -116,4 +116,4 @@ NativeMoveCompletionAction DecideNativeMoveCompletion(
                : NativeMoveCompletionAction::WaitForStartEvent;
 }
 
-}  // namespace superdrag
+}  // namespace nekodrag

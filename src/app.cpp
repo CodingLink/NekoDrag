@@ -18,13 +18,20 @@
 #include <string>
 #include <vector>
 
-namespace superdrag {
+namespace nekodrag {
 namespace {
 
-constexpr wchar_t kMainWindowClass[] = L"SuperDrag.HiddenWindow";
-constexpr wchar_t kMainWindowTitle[] = L"SuperDrag.MessageWindow";
-constexpr wchar_t kSettingsWindowClass[] = L"SuperDrag.SettingsWindow";
-constexpr wchar_t kInstanceMutex[] = L"Local\\SuperDrag.SingleInstance";
+constexpr wchar_t kMainWindowClass[] = L"NekoDrag.HiddenWindow";
+constexpr wchar_t kMainWindowTitle[] = L"NekoDrag.MessageWindow";
+constexpr wchar_t kSettingsWindowClass[] = L"NekoDrag.SettingsWindow";
+constexpr wchar_t kInstanceMutex[] = L"Local\\NekoDrag.SingleInstance";
+
+// Legacy identifiers are retained only to prevent duplicate hooks during an
+// in-place upgrade and to focus an already-running legacy instance.
+constexpr wchar_t kLegacyMainWindowClass[] = L"SuperDrag.HiddenWindow";
+constexpr wchar_t kLegacyMainWindowTitle[] = L"SuperDrag.MessageWindow";
+constexpr wchar_t kLegacyInstanceMutex[] =
+    L"Local\\SuperDrag.SingleInstance";
 
 constexpr UINT kMessageTray = WM_APP + 1;
 constexpr UINT kMessageBeginDrag = WM_APP + 2;
@@ -75,9 +82,9 @@ constexpr std::array<int, 3> kDragModeControlIds{
     kControlDragModeCompatibility,
 };
 
-SuperDragApp* gApp = nullptr;
+NekoDragApp* gApp = nullptr;
 
-#ifdef SUPERDRAG_TRACE
+#ifdef NEKODRAG_TRACE
 const wchar_t* DragEngineModeTraceName(DragEngineMode mode) noexcept {
     switch (mode) {
         case DragEngineMode::Automatic:
@@ -98,12 +105,12 @@ void TraceDragState(const wchar_t* format, ...) {
     va_end(args);
 
     wchar_t line[288]{};
-    swprintf_s(line, std::size(line), L"[SuperDrag] %ls\n", message);
+    swprintf_s(line, std::size(line), L"[NekoDrag] %ls\n", message);
     OutputDebugStringW(line);
 }
-#define SD_TRACE(...) TraceDragState(__VA_ARGS__)
+#define ND_TRACE(...) TraceDragState(__VA_ARGS__)
 #else
-#define SD_TRACE(...) ((void)0)
+#define ND_TRACE(...) ((void)0)
 #endif
 
 std::wstring ErrorWithCode(const wchar_t* message, DWORD errorCode) {
@@ -233,27 +240,39 @@ DragEngineMode SelectedDragEngineMode(HWND parent) noexcept {
     return DragEngineMode::Automatic;
 }
 
+void NotifyExistingInstance(const wchar_t* windowClass,
+                            const wchar_t* windowTitle) {
+    for (int attempt = 0; attempt < 20; ++attempt) {
+        HWND existing = FindWindowW(windowClass, windowTitle);
+        if (existing != nullptr) {
+            PostMessageW(existing, kMessageOpenSettings, 0, 0);
+            return;
+        }
+        Sleep(25);
+    }
+}
+
 }  // namespace
 
-SuperDragApp::SuperDragApp(HINSTANCE instance) noexcept : instance_(instance) {
+NekoDragApp::NekoDragApp(HINSTANCE instance) noexcept : instance_(instance) {
     gApp = this;
 }
 
-SuperDragApp::~SuperDragApp() {
+NekoDragApp::~NekoDragApp() {
     Shutdown();
     if (gApp == this) {
         gApp = nullptr;
     }
 }
 
-int SuperDragApp::Run(int) {
+int NekoDragApp::Run(int) {
     if (!EnsureSingleInstance()) {
         return 0;
     }
 
     std::wstring error;
     if (!Initialize(&error)) {
-        MessageBoxW(nullptr, error.c_str(), L"SuperDrag 启动失败",
+        MessageBoxW(nullptr, error.c_str(), L"NekoDrag 启动失败",
                     MB_OK | MB_ICONERROR);
         return 1;
     }
@@ -272,10 +291,10 @@ int SuperDragApp::Run(int) {
     return result == -1 ? 1 : static_cast<int>(message.wParam);
 }
 
-bool SuperDragApp::EnsureSingleInstance() {
+bool NekoDragApp::EnsureSingleInstance() {
     instanceMutex_ = CreateMutexW(nullptr, TRUE, kInstanceMutex);
     if (instanceMutex_ == nullptr) {
-        MessageBoxW(nullptr, L"无法创建单实例锁。", L"SuperDrag 启动失败",
+        MessageBoxW(nullptr, L"无法创建单实例锁。", L"NekoDrag 启动失败",
                     MB_OK | MB_ICONERROR);
         return false;
     }
@@ -283,28 +302,42 @@ bool SuperDragApp::EnsureSingleInstance() {
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         CloseHandle(instanceMutex_);
         instanceMutex_ = nullptr;
-        for (int attempt = 0; attempt < 20; ++attempt) {
-            HWND existing = FindWindowW(kMainWindowClass, kMainWindowTitle);
-            if (existing != nullptr) {
-                PostMessageW(existing, kMessageOpenSettings, 0, 0);
-                break;
-            }
-            Sleep(25);
-        }
+        NotifyExistingInstance(kMainWindowClass, kMainWindowTitle);
+        return false;
+    }
+
+    legacyInstanceMutex_ = CreateMutexW(nullptr, TRUE, kLegacyInstanceMutex);
+    if (legacyInstanceMutex_ == nullptr) {
+        CloseHandle(instanceMutex_);
+        instanceMutex_ = nullptr;
+        MessageBoxW(nullptr, L"无法创建升级兼容单实例锁。",
+                    L"NekoDrag 启动失败", MB_OK | MB_ICONERROR);
+        return false;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(legacyInstanceMutex_);
+        legacyInstanceMutex_ = nullptr;
+        CloseHandle(instanceMutex_);
+        instanceMutex_ = nullptr;
+        NotifyExistingInstance(kLegacyMainWindowClass,
+                               kLegacyMainWindowTitle);
         return false;
     }
 
     ReleaseMutex(instanceMutex_);
+    ReleaseMutex(legacyInstanceMutex_);
     return true;
 }
 
-bool SuperDragApp::Initialize(std::wstring* error) {
-    bool settingsKeyExists = false;
-    if (!LoadSettings(&settings_, &settingsKeyExists, error)) {
+bool NekoDragApp::Initialize(std::wstring* error) {
+    SettingsLoadInfo settingsLoadInfo;
+    if (!LoadSettings(&settings_, &settingsLoadInfo, error)) {
         return false;
     }
     const bool firstLaunch =
-        !settingsKeyExists || !settings_.firstRunCompleted;
+        !settingsLoadInfo.settingsKeyExists ||
+        (!settingsLoadInfo.importedLegacySettings &&
+         !settings_.firstRunCompleted);
 
     if (!QueryProcessIntegrity(GetCurrentProcess(), &ownIntegrityLevel_)) {
         ownIntegrityLevel_ = SECURITY_MANDATORY_MEDIUM_RID;
@@ -321,9 +354,22 @@ bool SuperDragApp::Initialize(std::wstring* error) {
         return false;
     }
 
+    if (settingsLoadInfo.importedLegacySettings) {
+        settings_.firstRunCompleted = true;
+        std::wstring migrationError;
+        if (!SaveSettings(settings_, &migrationError)) {
+            std::wstring message = L"无法迁移旧 SuperDrag 设置";
+            if (!migrationError.empty()) {
+                message.append(L"：");
+                message.append(migrationError);
+            }
+            ShowTrayNotification(L"NekoDrag", message.c_str(), NIIF_WARNING);
+        }
+    }
+
     std::wstring startupError;
     if (!ReconcileStartupPath(&startupError)) {
-        ShowTrayNotification(L"SuperDrag",
+        ShowTrayNotification(L"NekoDrag",
                              startupError.empty()
                                  ? L"无法更新开机启动路径。"
                                  : startupError.c_str(),
@@ -334,7 +380,7 @@ bool SuperDragApp::Initialize(std::wstring* error) {
         settings_.firstRunCompleted = true;
         std::wstring saveError;
         if (!SaveSettings(settings_, &saveError)) {
-            ShowTrayNotification(L"SuperDrag", saveError.c_str(),
+            ShowTrayNotification(L"NekoDrag", saveError.c_str(),
                                  NIIF_WARNING);
         }
     }
@@ -351,7 +397,7 @@ bool SuperDragApp::Initialize(std::wstring* error) {
     return true;
 }
 
-bool SuperDragApp::StartMoveWorker(std::wstring* error) {
+bool NekoDragApp::StartMoveWorker(std::wstring* error) {
     moveWorker_ =
         std::make_unique<WindowMoveWorker>(mainWindow_, kMessageMoveCompleted);
     if (!moveWorker_->Start()) {
@@ -364,7 +410,7 @@ bool SuperDragApp::StartMoveWorker(std::wstring* error) {
     return true;
 }
 
-void SuperDragApp::InitializeNativeMoveInfrastructure() {
+void NekoDragApp::InitializeNativeMoveInfrastructure() {
     nativeMoveAvailable_ = false;
     nativeEventCompletionWindow_.store(mainWindow_,
                                        std::memory_order_release);
@@ -380,18 +426,18 @@ void SuperDragApp::InitializeNativeMoveInfrastructure() {
     nativeMoveAvailable_ = true;
 }
 
-bool SuperDragApp::StartNativeMoveWorker() {
+bool NekoDragApp::StartNativeMoveWorker() {
     nativeMoveWorker_ = std::make_unique<NativeMoveWorker>(
         mainWindow_, kMessageNativeMoveCompleted);
     if (!nativeMoveWorker_->Start()) {
         nativeMoveWorker_.reset();
-        SD_TRACE(L"native move worker failed to start");
+        ND_TRACE(L"native move worker failed to start");
         return false;
     }
     return true;
 }
 
-bool SuperDragApp::InstallNativeMoveEventHook() {
+bool NekoDragApp::InstallNativeMoveEventHook() {
     if (nativeMoveEventHook_ != nullptr) {
         return true;
     }
@@ -405,7 +451,7 @@ bool SuperDragApp::InstallNativeMoveEventHook() {
         if (error == ERROR_SUCCESS) {
             error = ERROR_GEN_FAILURE;
         }
-        SD_TRACE(L"native move event hook install failed error=%lu",
+        ND_TRACE(L"native move event hook install failed error=%lu",
                  static_cast<unsigned long>(error));
         static_cast<void>(error);
         return false;
@@ -413,7 +459,7 @@ bool SuperDragApp::InstallNativeMoveEventHook() {
     return true;
 }
 
-void SuperDragApp::RemoveNativeMoveEventHook() {
+void NekoDragApp::RemoveNativeMoveEventHook() {
     nativeMoveAvailable_ = false;
     nativeEventGeneration_.store(0, std::memory_order_release);
     nativeEventCompletionWindow_.store(nullptr, std::memory_order_release);
@@ -423,7 +469,7 @@ void SuperDragApp::RemoveNativeMoveEventHook() {
     }
 }
 
-void SuperDragApp::AbandonAndRestartNativeMoveWorker() {
+void NekoDragApp::AbandonAndRestartNativeMoveWorker() {
     nativeMoveAvailable_ = false;
     if (nativeMoveWorker_ != nullptr) {
         nativeMoveWorker_->StopAccepting();
@@ -436,7 +482,7 @@ void SuperDragApp::AbandonAndRestartNativeMoveWorker() {
     }
 }
 
-bool SuperDragApp::RegisterWindowClasses(std::wstring* error) {
+bool NekoDragApp::RegisterWindowClasses(std::wstring* error) {
     WNDCLASSEXW mainClass{};
     mainClass.cbSize = sizeof(mainClass);
     mainClass.lpfnWndProc = MainWindowProc;
@@ -464,7 +510,7 @@ bool SuperDragApp::RegisterWindowClasses(std::wstring* error) {
     return true;
 }
 
-bool SuperDragApp::CreateMainWindow(std::wstring* error) {
+bool NekoDragApp::CreateMainWindow(std::wstring* error) {
     mainWindow_ = CreateWindowExW(
         WS_EX_TOOLWINDOW, kMainWindowClass, kMainWindowTitle, WS_POPUP, 0, 0,
         0, 0, nullptr, nullptr, instance_, this);
@@ -475,7 +521,7 @@ bool SuperDragApp::CreateMainWindow(std::wstring* error) {
     return true;
 }
 
-bool SuperDragApp::CreateSettingsWindow(std::wstring* error) {
+bool NekoDragApp::CreateSettingsWindow(std::wstring* error) {
     if (settingsWindow_ != nullptr) {
         return true;
     }
@@ -522,7 +568,7 @@ bool SuperDragApp::CreateSettingsWindow(std::wstring* error) {
     const int y = workTop + (workHeight - height) / 2;
 
     settingsWindow_ = CreateWindowExW(
-        extendedStyle, kSettingsWindowClass, L"SuperDrag 设置", style, x, y,
+        extendedStyle, kSettingsWindowClass, L"NekoDrag 设置", style, x, y,
         width, height, mainWindow_, nullptr, instance_, this);
     if (settingsWindow_ == nullptr) {
         *error = ErrorWithCode(L"创建设置窗口失败", GetLastError());
@@ -552,7 +598,7 @@ bool SuperDragApp::CreateSettingsWindow(std::wstring* error) {
     return true;
 }
 
-void SuperDragApp::Shutdown() {
+void NekoDragApp::Shutdown() {
     if (shuttingDown_) {
         return;
     }
@@ -592,16 +638,20 @@ void SuperDragApp::Shutdown() {
         CloseHandle(instanceMutex_);
         instanceMutex_ = nullptr;
     }
+    if (legacyInstanceMutex_ != nullptr) {
+        CloseHandle(legacyInstanceMutex_);
+        legacyInstanceMutex_ = nullptr;
+    }
 }
 
-LRESULT CALLBACK SuperDragApp::MainWindowProc(HWND window, UINT message,
+LRESULT CALLBACK NekoDragApp::MainWindowProc(HWND window, UINT message,
                                                WPARAM wParam,
                                                LPARAM lParam) {
-    SuperDragApp* app = reinterpret_cast<SuperDragApp*>(
+    NekoDragApp* app = reinterpret_cast<NekoDragApp*>(
         GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-        app = static_cast<SuperDragApp*>(create->lpCreateParams);
+        app = static_cast<NekoDragApp*>(create->lpCreateParams);
         app->mainWindow_ = window;
         SetWindowLongPtrW(window, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(app));
@@ -611,14 +661,14 @@ LRESULT CALLBACK SuperDragApp::MainWindowProc(HWND window, UINT message,
                : DefWindowProcW(window, message, wParam, lParam);
 }
 
-LRESULT CALLBACK SuperDragApp::SettingsWindowProc(HWND window, UINT message,
+LRESULT CALLBACK NekoDragApp::SettingsWindowProc(HWND window, UINT message,
                                                    WPARAM wParam,
                                                    LPARAM lParam) {
-    SuperDragApp* app = reinterpret_cast<SuperDragApp*>(
+    NekoDragApp* app = reinterpret_cast<NekoDragApp*>(
         GetWindowLongPtrW(window, GWLP_USERDATA));
     if (message == WM_NCCREATE) {
         const auto* create = reinterpret_cast<const CREATESTRUCTW*>(lParam);
-        app = static_cast<SuperDragApp*>(create->lpCreateParams);
+        app = static_cast<NekoDragApp*>(create->lpCreateParams);
         app->settingsWindow_ = window;
         SetWindowLongPtrW(window, GWLP_USERDATA,
                           reinterpret_cast<LONG_PTR>(app));
@@ -628,7 +678,7 @@ LRESULT CALLBACK SuperDragApp::SettingsWindowProc(HWND window, UINT message,
                : DefWindowProcW(window, message, wParam, lParam);
 }
 
-LRESULT CALLBACK SuperDragApp::MouseHookProc(int code, WPARAM message,
+LRESULT CALLBACK NekoDragApp::MouseHookProc(int code, WPARAM message,
                                               LPARAM lParam) {
     if (gApp == nullptr) {
         return CallNextHookEx(nullptr, code, message, lParam);
@@ -637,7 +687,7 @@ LRESULT CALLBACK SuperDragApp::MouseHookProc(int code, WPARAM message,
         code, message, reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam));
 }
 
-void CALLBACK SuperDragApp::NativeMoveEventProc(
+void CALLBACK NekoDragApp::NativeMoveEventProc(
     HWINEVENTHOOK, DWORD event, HWND window, LONG, LONG, DWORD, DWORD) {
     if (gApp == nullptr || window == nullptr ||
         (event != EVENT_SYSTEM_MOVESIZESTART &&
@@ -659,7 +709,7 @@ void CALLBACK SuperDragApp::NativeMoveEventProc(
                  reinterpret_cast<LPARAM>(window));
 }
 
-LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
+LRESULT NekoDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                                     LPARAM lParam) {
     if (taskbarCreatedMessage_ != 0 && message == taskbarCreatedMessage_) {
         trayIconAdded_ = false;
@@ -730,7 +780,7 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
             if (wParam == kDragReleaseTimer) {
                 KillTimer(window, kDragReleaseTimer);
                 if (drag_.active && drag_.releasePending) {
-                    SD_TRACE(L"end drag: final move timed out");
+                    ND_TRACE(L"end drag: final move timed out");
                     EndDrag(L"final-move-timeout");
                 }
                 return 0;
@@ -743,7 +793,7 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
             if (wParam == kNativeCompletionTimer) {
                 KillTimer(window, kNativeCompletionTimer);
                 if (drag_.active && IsNativeDrag()) {
-                    SD_TRACE(L"native move completion timed out generation=%llu",
+                    ND_TRACE(L"native move completion timed out generation=%llu",
                              static_cast<unsigned long long>(
                                  drag_.generation));
                     AbandonAndRestartNativeMoveWorker();
@@ -775,7 +825,7 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
+LRESULT NekoDragApp::OnSettingsMessage(HWND window, UINT message,
                                         WPARAM wParam, LPARAM lParam) {
     switch (message) {
         case WM_CREATE:
@@ -974,7 +1024,7 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-bool SuperDragApp::InstallMouseHook(std::wstring* error, DWORD* errorCode) {
+bool NekoDragApp::InstallMouseHook(std::wstring* error, DWORD* errorCode) {
     if (mouseHook_ != nullptr) {
         if (errorCode != nullptr) {
             *errorCode = ERROR_SUCCESS;
@@ -1002,14 +1052,14 @@ bool SuperDragApp::InstallMouseHook(std::wstring* error, DWORD* errorCode) {
     return true;
 }
 
-void SuperDragApp::RemoveMouseHook() {
+void NekoDragApp::RemoveMouseHook() {
     if (mouseHook_ != nullptr) {
         UnhookWindowsHookEx(mouseHook_);
         mouseHook_ = nullptr;
     }
 }
 
-void SuperDragApp::RequestMouseHookInstall(bool resetRetries) {
+void NekoDragApp::RequestMouseHookInstall(bool resetRetries) {
     if (resetRetries) {
         hookRetryIndex_ = 0;
     }
@@ -1032,7 +1082,7 @@ void SuperDragApp::RequestMouseHookInstall(bool resetRetries) {
     }
     if (PostMessageW(mainWindow_, kMessageEnsureMouseHook, 0, 0)) {
         hookInstallMessagePending_ = true;
-        SD_TRACE(L"mouse hook install queued");
+        ND_TRACE(L"mouse hook install queued");
         return;
     }
 
@@ -1044,7 +1094,7 @@ void SuperDragApp::RequestMouseHookInstall(bool resetRetries) {
         code, ErrorWithCode(L"无法安排全局鼠标监听", code));
 }
 
-void SuperDragApp::AttemptMouseHookInstall() {
+void NekoDragApp::AttemptMouseHookInstall() {
     if (shuttingDown_ || !settings_.enabled || mainWindow_ == nullptr) {
         hookRuntimeState_ = HookRuntimeState::Stopped;
         return;
@@ -1060,25 +1110,25 @@ void SuperDragApp::AttemptMouseHookInstall() {
 
     std::wstring error;
     DWORD errorCode = ERROR_SUCCESS;
-    SD_TRACE(L"installing mouse hook attempt=%llu",
+    ND_TRACE(L"installing mouse hook attempt=%llu",
              static_cast<unsigned long long>(hookRetryIndex_ + 1));
     if (InstallMouseHook(&error, &errorCode)) {
         hookRuntimeState_ = HookRuntimeState::Active;
         hookRetryIndex_ = 0;
         lastHookError_ = ERROR_SUCCESS;
         lastHookErrorText_.clear();
-        SD_TRACE(L"mouse hook installed handle=%p", mouseHook_);
+        ND_TRACE(L"mouse hook installed handle=%p", mouseHook_);
         UpdateHookStatusInSettings();
         return;
     }
     HandleMouseHookInstallFailure(errorCode, error);
 }
 
-void SuperDragApp::HandleMouseHookInstallFailure(
+void NekoDragApp::HandleMouseHookInstallFailure(
     DWORD errorCode, const std::wstring& error) {
     lastHookError_ = errorCode;
     lastHookErrorText_ = error;
-    SD_TRACE(L"mouse hook install failed error=%lu retryIndex=%llu",
+    ND_TRACE(L"mouse hook install failed error=%lu retryIndex=%llu",
              static_cast<unsigned long>(errorCode),
              static_cast<unsigned long long>(hookRetryIndex_));
 
@@ -1087,7 +1137,7 @@ void SuperDragApp::HandleMouseHookInstallFailure(
         const UINT delay = kHookRetryDelaysMs[hookRetryIndex_++];
         if (SetTimer(mainWindow_, kHookRetryTimer, delay, nullptr) != 0) {
             hookRuntimeState_ = HookRuntimeState::Starting;
-            SD_TRACE(L"mouse hook retry scheduled delay=%u", delay);
+            ND_TRACE(L"mouse hook retry scheduled delay=%u", delay);
             SetHookStatus(L"正在重试启用窗口拖动；上次失败：" + error,
                           true);
             return;
@@ -1096,11 +1146,11 @@ void SuperDragApp::HandleMouseHookInstallFailure(
 
     hookRuntimeState_ = HookRuntimeState::Failed;
     SetHookStatus(error + L"。请从托盘菜单重试启用。", true);
-    ShowTrayNotification(L"SuperDrag", lastHookErrorText_.c_str(),
+    ShowTrayNotification(L"NekoDrag", lastHookErrorText_.c_str(),
                          NIIF_ERROR);
 }
 
-void SuperDragApp::CancelMouseHookRetry() {
+void NekoDragApp::CancelMouseHookRetry() {
     if (mainWindow_ != nullptr) {
         KillTimer(mainWindow_, kHookRetryTimer);
     }
@@ -1108,12 +1158,12 @@ void SuperDragApp::CancelMouseHookRetry() {
     hookRetryIndex_ = 0;
 }
 
-bool SuperDragApp::IsMouseHookActive() const noexcept {
+bool NekoDragApp::IsMouseHookActive() const noexcept {
     return hookRuntimeState_ == HookRuntimeState::Active &&
            mouseHook_ != nullptr;
 }
 
-std::uint32_t SuperDragApp::CurrentModifierMask() const noexcept {
+std::uint32_t NekoDragApp::CurrentModifierMask() const noexcept {
     std::uint32_t mask = 0;
     if (IsKeyDown(VK_MENU)) {
         mask |= kModifierAlt;
@@ -1130,12 +1180,12 @@ std::uint32_t SuperDragApp::CurrentModifierMask() const noexcept {
     return mask;
 }
 
-bool SuperDragApp::IsConfiguredChordDown() const noexcept {
+bool NekoDragApp::IsConfiguredChordDown() const noexcept {
     return IsExactModifierMatch(settings_.modifierMask,
                                 CurrentModifierMask());
 }
 
-HWND SuperDragApp::ResolveDragTarget(POINT cursor, bool* restricted) const {
+HWND NekoDragApp::ResolveDragTarget(POINT cursor, bool* restricted) const {
     *restricted = false;
     HWND target = WindowFromPoint(cursor);
     if (target == nullptr) {
@@ -1178,7 +1228,7 @@ HWND SuperDragApp::ResolveDragTarget(POINT cursor, bool* restricted) const {
     return target;
 }
 
-bool SuperDragApp::IsTargetHigherIntegrity(HWND target) const {
+bool NekoDragApp::IsTargetHigherIntegrity(HWND target) const {
     DWORD targetIntegrity = 0;
     if (!QueryWindowIntegrity(target, &targetIntegrity)) {
         return true;
@@ -1186,7 +1236,7 @@ bool SuperDragApp::IsTargetHigherIntegrity(HWND target) const {
     return targetIntegrity > ownIntegrityLevel_;
 }
 
-bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
+bool NekoDragApp::BeginDragFromHook(HWND target, Point cursor) {
     RECT windowRect{};
     if (!GetWindowRect(target, &windowRect)) {
         return false;
@@ -1224,7 +1274,7 @@ bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
     return true;
 }
 
-LRESULT SuperDragApp::HandleMouseHook(
+LRESULT NekoDragApp::HandleMouseHook(
     int code, WPARAM message, const MSLLHOOKSTRUCT* mouseInfo) {
     if (code < 0 || mouseInfo == nullptr) {
         return CallNextHookEx(mouseHook_, code, message,
@@ -1301,7 +1351,7 @@ LRESULT SuperDragApp::HandleMouseHook(
                           reinterpret_cast<LPARAM>(mouseInfo));
 }
 
-void SuperDragApp::BeginDragOnMessageThread() {
+void NekoDragApp::BeginDragOnMessageThread() {
     if (!drag_.active || !drag_.beginPending ||
         !IsWindow(drag_.target)) {
         EndDrag(L"target-invalid-before-begin");
@@ -1309,7 +1359,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
     }
     drag_.beginPending = false;
     SetForegroundWindow(drag_.target);
-    SD_TRACE(L"begin drag generation=%llu target=%p cursor=(%ld,%ld) "
+    ND_TRACE(L"begin drag generation=%llu target=%p cursor=(%ld,%ld) "
              L"maximized=%d nativeAvailable=%d engine=%ls",
              static_cast<unsigned long long>(drag_.generation), drag_.target,
              static_cast<long>(drag_.startCursor.x),
@@ -1323,10 +1373,10 @@ void SuperDragApp::BeginDragOnMessageThread() {
         SelectDragStartAction(drag_.engineMode, nativeReady);
     if (startAction == DragStartAction::Compatibility) {
         if (drag_.engineMode == DragEngineMode::CompatibilityOnly) {
-            SD_TRACE(L"compatibility-direct generation=%llu",
+            ND_TRACE(L"compatibility-direct generation=%llu",
                      static_cast<unsigned long long>(drag_.generation));
         } else {
-            SD_TRACE(L"automatic-fallback generation=%llu "
+            ND_TRACE(L"automatic-fallback generation=%llu "
                      L"reason=native-unavailable",
                      static_cast<unsigned long long>(drag_.generation));
         }
@@ -1345,7 +1395,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
     const NativeMoveWorker::Request request{
         drag_.generation, drag_.target, drag_.startCursor};
     if (nativeMoveWorker_->Submit(request)) {
-        SD_TRACE(L"native move requested generation=%llu target=%p",
+        ND_TRACE(L"native move requested generation=%llu target=%p",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target);
         return;
@@ -1353,7 +1403,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
     AbandonAndRestartNativeMoveWorker();
     if (nativeMoveAvailable_ && nativeMoveWorker_ != nullptr &&
         nativeMoveWorker_->Submit(request)) {
-        SD_TRACE(L"native move worker replaced and request retried "
+        ND_TRACE(L"native move worker replaced and request retried "
                  L"generation=%llu target=%p",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target);
@@ -1361,7 +1411,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
     }
     nativeEventGeneration_.store(0, std::memory_order_release);
     if (AllowsCompatibilityFallback(drag_.engineMode)) {
-        SD_TRACE(L"automatic-fallback generation=%llu "
+        ND_TRACE(L"automatic-fallback generation=%llu "
                  L"reason=native-worker-unavailable",
                  static_cast<unsigned long long>(drag_.generation));
         BeginManualFallback(false);
@@ -1371,7 +1421,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
     }
 }
 
-void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
+void NekoDragApp::BeginManualFallback(bool nativeAttempted) {
     if (!drag_.active || !IsWindow(drag_.target)) {
         EndDrag(L"target-invalid-before-manual-fallback");
         return;
@@ -1382,7 +1432,7 @@ void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
         return;
     }
     if (IsHungAppWindow(drag_.target)) {
-        ShowTrayNotification(L"SuperDrag",
+        ShowTrayNotification(L"NekoDrag",
                              L"目标窗口无响应，已停止当前拖动。",
                              NIIF_WARNING);
         if (nativeAttempted) {
@@ -1440,7 +1490,7 @@ void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
         }
     }
     if (nativeAttempted) {
-        SD_TRACE(L"automatic-fallback generation=%llu "
+        ND_TRACE(L"automatic-fallback generation=%llu "
                  L"reason=native-move-ignored "
                  L"targetMoved=%d",
                  static_cast<unsigned long long>(drag_.generation),
@@ -1449,12 +1499,12 @@ void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
     ScheduleDragUpdate();
 }
 
-bool SuperDragApp::IsNativeDrag() const noexcept {
+bool NekoDragApp::IsNativeDrag() const noexcept {
     return drag_.mode == DragMode::NativeStarting ||
            drag_.mode == DragMode::NativeActive;
 }
 
-void SuperDragApp::HandleNativeMoveCompleted() {
+void NekoDragApp::HandleNativeMoveCompleted() {
     if (nativeMoveWorker_ == nullptr) {
         return;
     }
@@ -1466,7 +1516,7 @@ void SuperDragApp::HandleNativeMoveCompleted() {
         drag_.active && IsNativeDrag() &&
         result.generation == drag_.generation &&
         result.target == drag_.target;
-    SD_TRACE(L"native move returned generation=%llu target=%p "
+    ND_TRACE(L"native move returned generation=%llu target=%p "
              L"current=%d dispatched=%d releaseObserved=%d error=%lu "
              L"elapsedUs=%llu",
              static_cast<unsigned long long>(result.generation),
@@ -1486,7 +1536,7 @@ void SuperDragApp::HandleNativeMoveCompleted() {
         // The WinEvent end notification can still be queued behind this
         // completion message, so record the equivalent terminal state here.
         drag_.nativeMoveEndObserved = true;
-        SD_TRACE(L"native move ended generation=%llu target=%p "
+        ND_TRACE(L"native move ended generation=%llu target=%p "
                  L"source=worker-return",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target);
@@ -1501,7 +1551,7 @@ void SuperDragApp::HandleNativeMoveCompleted() {
             result.error == ERROR_PRIVILEGE_NOT_HELD) {
             ShowPrivilegeHintOnce();
         } else if (result.error == ERROR_TIMEOUT) {
-            ShowTrayNotification(L"SuperDrag",
+            ShowTrayNotification(L"NekoDrag",
                                  L"目标窗口无响应，已停止当前拖动。",
                                  NIIF_WARNING);
         }
@@ -1534,7 +1584,7 @@ void SuperDragApp::HandleNativeMoveCompleted() {
     }
 }
 
-void SuperDragApp::HandleNativeMoveEvent(bool started,
+void NekoDragApp::HandleNativeMoveEvent(bool started,
                                          std::uint64_t generation,
                                          HWND target) {
     if (!drag_.active || !IsNativeDrag() ||
@@ -1545,7 +1595,7 @@ void SuperDragApp::HandleNativeMoveEvent(bool started,
         drag_.nativeMoveStarted = true;
         drag_.mode = DragMode::NativeActive;
         KillTimer(mainWindow_, kNativeFallbackTimer);
-        SD_TRACE(L"native move started generation=%llu target=%p",
+        ND_TRACE(L"native move started generation=%llu target=%p",
                  static_cast<unsigned long long>(generation), target);
         if (drag_.nativeMoveReturned) {
             CompleteNativeDrag(L"native-move-complete");
@@ -1554,11 +1604,11 @@ void SuperDragApp::HandleNativeMoveEvent(bool started,
     }
 
     drag_.nativeMoveEndObserved = true;
-    SD_TRACE(L"native move ended generation=%llu target=%p",
+    ND_TRACE(L"native move ended generation=%llu target=%p",
              static_cast<unsigned long long>(generation), target);
 }
 
-void SuperDragApp::HandleNativeFallbackTimeout() {
+void NekoDragApp::HandleNativeFallbackTimeout() {
     if (!drag_.active || !IsNativeDrag() || !drag_.nativeMoveReturned) {
         return;
     }
@@ -1576,7 +1626,7 @@ void SuperDragApp::HandleNativeFallbackTimeout() {
     }
 }
 
-void SuperDragApp::NoteNativeButtonReleased() {
+void NekoDragApp::NoteNativeButtonReleased() {
     if (!drag_.active || !IsNativeDrag() || drag_.nativeButtonReleased) {
         return;
     }
@@ -1586,7 +1636,7 @@ void SuperDragApp::NoteNativeButtonReleased() {
                  reinterpret_cast<LPARAM>(drag_.target));
 }
 
-void SuperDragApp::HandleNativeButtonReleased(
+void NekoDragApp::HandleNativeButtonReleased(
     std::uint64_t generation, HWND target) {
     if (!drag_.active || !IsNativeDrag() ||
         generation != drag_.generation || target != drag_.target) {
@@ -1608,15 +1658,15 @@ void SuperDragApp::HandleNativeButtonReleased(
     }
 }
 
-void SuperDragApp::CompleteNativeDrag(const wchar_t* reason) {
+void NekoDragApp::CompleteNativeDrag(const wchar_t* reason) {
     EndDrag(reason);
     RestoreMouseHookAfterNativeDrag();
 }
 
-void SuperDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
+void NekoDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
                                       bool nativeAttempted) {
     static_cast<void>(reason);
-    SD_TRACE(L"native-only-failed generation=%llu target=%p reason=%ls "
+    ND_TRACE(L"native-only-failed generation=%llu target=%p reason=%ls "
              L"error=%lu",
              static_cast<unsigned long long>(drag_.generation), drag_.target,
              reason != nullptr ? reason : L"unspecified",
@@ -1630,7 +1680,7 @@ void SuperDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
             message.append(L"）");
         }
         message.append(L"。请在设置中切换到“自动”或“仅兼容模式”。");
-        ShowTrayNotification(L"SuperDrag", message.c_str(), NIIF_WARNING);
+        ShowTrayNotification(L"NekoDrag", message.c_str(), NIIF_WARNING);
     }
     if (nativeAttempted) {
         CompleteNativeDrag(reason);
@@ -1639,7 +1689,7 @@ void SuperDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
     }
 }
 
-void SuperDragApp::RestoreMouseHookAfterNativeDrag() {
+void NekoDragApp::RestoreMouseHookAfterNativeDrag() {
     if (shuttingDown_ || !settings_.enabled) {
         return;
     }
@@ -1647,7 +1697,7 @@ void SuperDragApp::RestoreMouseHookAfterNativeDrag() {
     RequestMouseHookInstall(true);
 }
 
-void SuperDragApp::ScheduleDragUpdate() {
+void NekoDragApp::ScheduleDragUpdate() {
     if (!drag_.active || drag_.updatePending) {
         return;
     }
@@ -1658,9 +1708,9 @@ void SuperDragApp::ScheduleDragUpdate() {
     }
 }
 
-bool SuperDragApp::SubmitLatestDragPosition(bool finalRequest) {
+bool NekoDragApp::SubmitLatestDragPosition(bool finalRequest) {
     if (!IsWindow(drag_.target)) {
-        SD_TRACE(L"end drag: target window gone");
+        ND_TRACE(L"end drag: target window gone");
         EndDrag(L"target-window-gone");
         return false;
     }
@@ -1682,7 +1732,7 @@ bool SuperDragApp::SubmitLatestDragPosition(bool finalRequest) {
         drag_.finalRequestedOrigin = origin;
         if (matchesLastApplied &&
             (!drag_.moveRequested || matchesLastRequested)) {
-            SD_TRACE(L"end drag: final position already applied");
+            ND_TRACE(L"end drag: final position already applied");
             EndDrag(L"final-already-applied");
             return true;
         }
@@ -1690,7 +1740,7 @@ bool SuperDragApp::SubmitLatestDragPosition(bool finalRequest) {
         if (matchesLastRequested) {
             if (SetTimer(mainWindow_, kDragReleaseTimer,
                          kDragReleaseTimeoutMs, nullptr) == 0) {
-                SD_TRACE(L"end drag: unable to start release timer");
+                ND_TRACE(L"end drag: unable to start release timer");
                 EndDrag(L"release-timer-failed");
                 return false;
             }
@@ -1714,14 +1764,14 @@ bool SuperDragApp::SubmitLatestDragPosition(bool finalRequest) {
     if (finalRequest &&
         SetTimer(mainWindow_, kDragReleaseTimer, kDragReleaseTimeoutMs,
                  nullptr) == 0) {
-        SD_TRACE(L"end drag: unable to start release timer");
+        ND_TRACE(L"end drag: unable to start release timer");
         EndDrag(L"release-timer-failed");
         return false;
     }
     return true;
 }
 
-void SuperDragApp::HandleMoveCompleted() {
+void NekoDragApp::HandleMoveCompleted() {
     if (moveWorker_ == nullptr) {
         return;
     }
@@ -1746,7 +1796,7 @@ void SuperDragApp::HandleMoveCompleted() {
     drag_.manualMaxElapsedUs =
         std::max(drag_.manualMaxElapsedUs, result.elapsedUs);
     if (!result.success) {
-        SD_TRACE(L"manual move failed generation=%llu error=%lu "
+        ND_TRACE(L"manual move failed generation=%llu error=%lu "
                  L"elapsedUs=%llu",
                  static_cast<unsigned long long>(result.generation),
                  static_cast<unsigned long>(result.error),
@@ -1761,7 +1811,7 @@ void SuperDragApp::HandleMoveCompleted() {
             } else {
                 message = ErrorWithCode(L"无法移动目标窗口", result.error);
             }
-            ShowTrayNotification(L"SuperDrag", message.c_str(), NIIF_WARNING);
+            ShowTrayNotification(L"NekoDrag", message.c_str(), NIIF_WARNING);
         }
         FailCurrentDrag(privilegeFailure, result.error);
         return;
@@ -1776,7 +1826,7 @@ void SuperDragApp::HandleMoveCompleted() {
     }
 }
 
-void SuperDragApp::ApplyLatestDragPosition() {
+void NekoDragApp::ApplyLatestDragPosition() {
     drag_.updatePending = false;
     if (!drag_.active || drag_.mode != DragMode::ManualFallback) {
         return;
@@ -1820,7 +1870,7 @@ void SuperDragApp::ApplyLatestDragPosition() {
         drag_.lastRequestedOrigin = drag_.lastAppliedOrigin;
         drag_.moveRequested = false;
         drag_.restoring = false;
-        SD_TRACE(L"maximized window restored actual=(%ld,%ld) target=(%ld,%ld)",
+        ND_TRACE(L"maximized window restored actual=(%ld,%ld) target=(%ld,%ld)",
                  static_cast<long>(restoredRect.left),
                  static_cast<long>(restoredRect.top),
                  static_cast<long>(restoredOrigin.x),
@@ -1834,12 +1884,12 @@ void SuperDragApp::ApplyLatestDragPosition() {
     }
 }
 
-void SuperDragApp::EndDrag(const wchar_t* reason, bool trace) {
+void NekoDragApp::EndDrag(const wchar_t* reason, bool trace) {
     static_cast<void>(reason);
     const std::uint64_t generation = drag_.generation;
     if (drag_.active && trace) {
         if (drag_.mode == DragMode::ManualFallback) {
-            SD_TRACE(L"end manual drag generation=%llu target=%p "
+            ND_TRACE(L"end manual drag generation=%llu target=%p "
                      L"requests=%llu completions=%llu coalesced=%llu "
                      L"maxElapsedUs=%llu reason=%ls",
                      static_cast<unsigned long long>(generation),
@@ -1853,7 +1903,7 @@ void SuperDragApp::EndDrag(const wchar_t* reason, bool trace) {
                          drag_.manualMaxElapsedUs),
                      reason != nullptr ? reason : L"unspecified");
         } else {
-            SD_TRACE(L"end native drag generation=%llu target=%p "
+            ND_TRACE(L"end native drag generation=%llu target=%p "
                      L"started=%d ended=%d reason=%ls",
                      static_cast<unsigned long long>(generation),
                      drag_.target, drag_.nativeMoveStarted ? 1 : 0,
@@ -1877,9 +1927,9 @@ void SuperDragApp::EndDrag(const wchar_t* reason, bool trace) {
     drag_ = DragState{};
 }
 
-void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint, DWORD error) {
+void NekoDragApp::FailCurrentDrag(bool showPrivilegeHint, DWORD error) {
     static_cast<void>(error);
-    SD_TRACE(L"drag failed, hint=%d error=%lu",
+    ND_TRACE(L"drag failed, hint=%d error=%lu",
              showPrivilegeHint ? 1 : 0,
              static_cast<unsigned long>(error));
     drag_.movementFailed = true;
@@ -1894,7 +1944,7 @@ void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint, DWORD error) {
     }
 }
 
-bool SuperDragApp::AddTrayIcon() {
+bool NekoDragApp::AddTrayIcon() {
     if (mainWindow_ == nullptr) {
         return false;
     }
@@ -1915,7 +1965,7 @@ bool SuperDragApp::AddTrayIcon() {
     iconData.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP;
     iconData.uCallbackMessage = kMessageTray;
     iconData.hIcon = icon;
-    wcscpy_s(iconData.szTip, L"SuperDrag");
+    wcscpy_s(iconData.szTip, L"NekoDrag");
     if (!Shell_NotifyIconW(NIM_ADD, &iconData)) {
         DestroyIcon(icon);
         return false;
@@ -1927,7 +1977,7 @@ bool SuperDragApp::AddTrayIcon() {
     return true;
 }
 
-void SuperDragApp::RemoveTrayIcon() {
+void NekoDragApp::RemoveTrayIcon() {
     if (!trayIconAdded_) {
         return;
     }
@@ -1939,7 +1989,7 @@ void SuperDragApp::RemoveTrayIcon() {
     trayIconAdded_ = false;
 }
 
-void SuperDragApp::ShowTrayMenu(POINT screenPoint) {
+void NekoDragApp::ShowTrayMenu(POINT screenPoint) {
     HMENU menu = CreatePopupMenu();
     if (menu == nullptr) {
         return;
@@ -1993,7 +2043,7 @@ void SuperDragApp::ShowTrayMenu(POINT screenPoint) {
     }
 }
 
-void SuperDragApp::ShowTrayNotification(const wchar_t* title,
+void NekoDragApp::ShowTrayNotification(const wchar_t* title,
                                          const wchar_t* message,
                                          DWORD iconFlags) {
     if (!trayIconAdded_) {
@@ -2010,7 +2060,7 @@ void SuperDragApp::ShowTrayNotification(const wchar_t* title,
     Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
 
-void SuperDragApp::ShowPrivilegeHintOnce() {
+void NekoDragApp::ShowPrivilegeHintOnce() {
     if (settings_.privilegeHintShown) {
         return;
     }
@@ -2019,14 +2069,14 @@ void SuperDragApp::ShowPrivilegeHintOnce() {
     SaveSettings(settings_, &ignoredError);
     ShowTrayNotification(
         L"无法移动此窗口",
-        L"目标窗口可能以管理员权限运行或受到系统保护。SuperDrag 不会请求管理员权限。",
+        L"目标窗口可能以管理员权限运行或受到系统保护。NekoDrag 不会请求管理员权限。",
         NIIF_WARNING);
 }
 
-void SuperDragApp::ShowSettingsWindow() {
+void NekoDragApp::ShowSettingsWindow() {
     std::wstring error;
     if (!CreateSettingsWindow(&error)) {
-        ShowTrayNotification(L"SuperDrag", error.c_str(), NIIF_ERROR);
+        ShowTrayNotification(L"NekoDrag", error.c_str(), NIIF_ERROR);
         return;
     }
     LoadSettingsIntoControls();
@@ -2034,7 +2084,7 @@ void SuperDragApp::ShowSettingsWindow() {
     SetForegroundWindow(settingsWindow_);
 }
 
-void SuperDragApp::ApplyThemeToSettingsWindow() {
+void NekoDragApp::ApplyThemeToSettingsWindow() {
     if (settingsWindow_ == nullptr || theme_ == nullptr) {
         return;
     }
@@ -2049,7 +2099,7 @@ void SuperDragApp::ApplyThemeToSettingsWindow() {
                      RDW_ALLCHILDREN);
 }
 
-void SuperDragApp::CreateSettingsControls() {
+void NekoDragApp::CreateSettingsControls() {
     auto create = [this](DWORD extendedStyle, const wchar_t* className,
                          const wchar_t* text, DWORD style, int id) {
         return CreateWindowExW(
@@ -2095,7 +2145,7 @@ void SuperDragApp::CreateSettingsControls() {
            BS_OWNERDRAW | WS_TABSTOP, kControlCancel);
 }
 
-void SuperDragApp::LayoutSettingsControls(UINT dpi) {
+void NekoDragApp::LayoutSettingsControls(UINT dpi) {
     if (settingsWindow_ == nullptr) {
         return;
     }
@@ -2192,14 +2242,14 @@ void SuperDragApp::LayoutSettingsControls(UINT dpi) {
     }
 }
 
-void SuperDragApp::RecreateSettingsFont(UINT dpi) {
+void NekoDragApp::RecreateSettingsFont(UINT dpi) {
     settingsFont_ = CreateFontW(
         -MulDiv(9, static_cast<int>(dpi), 72), 0, 0, 0, FW_NORMAL, FALSE,
         FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
 }
 
-void SuperDragApp::LoadSettingsIntoControls() {
+void NekoDragApp::LoadSettingsIntoControls() {
     SetCheckbox(settingsWindow_, kControlEnabled, settings_.enabled);
     SetCheckbox(settingsWindow_, kControlWin,
                 (settings_.modifierMask & kModifierWin) != 0);
@@ -2223,7 +2273,7 @@ void SuperDragApp::LoadSettingsIntoControls() {
     SetCheckbox(settingsWindow_, kControlStartup, startupEnabled);
 }
 
-void SuperDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
+void NekoDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
     hookStatusVisible_ = false;
     settingsStatusError_ = is_error;
     if (settingsWindow_ != nullptr) {
@@ -2235,12 +2285,12 @@ void SuperDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
     }
 }
 
-void SuperDragApp::SetHookStatus(const std::wstring& text, bool isError) {
+void NekoDragApp::SetHookStatus(const std::wstring& text, bool isError) {
     SetSettingsStatus(text, isError);
     hookStatusVisible_ = true;
 }
 
-void SuperDragApp::UpdateHookStatusInSettings() {
+void NekoDragApp::UpdateHookStatusInSettings() {
     if (settingsWindow_ == nullptr) {
         return;
     }
@@ -2268,7 +2318,7 @@ void SuperDragApp::UpdateHookStatusInSettings() {
     }
 }
 
-void SuperDragApp::SaveSettingsFromControls() {
+void NekoDragApp::SaveSettingsFromControls() {
     UserSettings requested = settings_;
     requested.enabled =
         IsCheckboxChecked(settingsWindow_, kControlEnabled);
@@ -2302,7 +2352,7 @@ void SuperDragApp::SaveSettingsFromControls() {
     ShowWindow(settingsWindow_, SW_HIDE);
 }
 
-bool SuperDragApp::CommitSettings(const UserSettings& requested,
+bool NekoDragApp::CommitSettings(const UserSettings& requested,
                                   bool startupEnabled,
                                   std::wstring* error) {
     bool oldStartupEnabled = false;
@@ -2340,7 +2390,7 @@ bool SuperDragApp::CommitSettings(const UserSettings& requested,
     return true;
 }
 
-void SuperDragApp::ToggleEnabledFromTray() {
+void NekoDragApp::ToggleEnabledFromTray() {
     if (settings_.enabled && !IsMouseHookActive()) {
         RequestMouseHookInstall(true);
         return;
@@ -2349,23 +2399,23 @@ void SuperDragApp::ToggleEnabledFromTray() {
     bool startupEnabled = false;
     std::wstring error;
     if (!QueryStartupEnabled(&startupEnabled, nullptr, &error)) {
-        ShowTrayNotification(L"SuperDrag", error.c_str(), NIIF_ERROR);
+        ShowTrayNotification(L"NekoDrag", error.c_str(), NIIF_ERROR);
         return;
     }
     UserSettings requested = settings_;
     requested.enabled = !requested.enabled;
     if (!CommitSettings(requested, startupEnabled, &error)) {
-        ShowTrayNotification(L"SuperDrag", error.c_str(), NIIF_ERROR);
+        ShowTrayNotification(L"NekoDrag", error.c_str(), NIIF_ERROR);
     }
 }
 
-void SuperDragApp::ToggleStartupFromTray() {
+void NekoDragApp::ToggleStartupFromTray() {
     bool startupEnabled = false;
     std::wstring error;
     if (!QueryStartupEnabled(&startupEnabled, nullptr, &error) ||
         !CommitSettings(settings_, !startupEnabled, &error)) {
-        ShowTrayNotification(L"SuperDrag", error.c_str(), NIIF_ERROR);
+        ShowTrayNotification(L"NekoDrag", error.c_str(), NIIF_ERROR);
     }
 }
 
-}  // namespace superdrag
+}  // namespace nekodrag

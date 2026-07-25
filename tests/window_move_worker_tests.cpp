@@ -27,12 +27,12 @@ void Expect(bool condition, const char* description) {
     }
 }
 
-bool SamePoint(superdrag::Point left, superdrag::Point right) {
+bool SamePoint(nekodrag::Point left, nekodrag::Point right) {
     return left.x == right.x && left.y == right.y;
 }
 
 void TestSettingsLayoutIncludesDragModeGroup() {
-    using superdrag::ui::SettingsLayout;
+    using nekodrag::ui::SettingsLayout;
 
     constexpr UINT testDpis[] = {96U, 144U, 192U};
     for (const UINT dpi : testDpis) {
@@ -71,9 +71,9 @@ void TestSettingsLayoutIncludesDragModeGroup() {
     }
 }
 
-bool WaitForRequestedOrigin(superdrag::WindowMoveWorker* worker,
-                            superdrag::Point expected,
-                            superdrag::WindowMoveWorker::Result* result) {
+bool WaitForRequestedOrigin(nekodrag::WindowMoveWorker* worker,
+                            nekodrag::Point expected,
+                            nekodrag::WindowMoveWorker::Result* result) {
     const auto deadline =
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (std::chrono::steady_clock::now() < deadline) {
@@ -93,8 +93,8 @@ void UpdateMaximum(std::atomic<int>* maximum, int value) {
 }
 
 void TestLatestRequestWinsAndMovesAreSerialized() {
-    using superdrag::Point;
-    using superdrag::WindowMoveWorker;
+    using nekodrag::Point;
+    using nekodrag::WindowMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -174,7 +174,7 @@ void TestLatestRequestWinsAndMovesAreSerialized() {
 }
 
 void TestNewGenerationSupersedesPendingOldDrag() {
-    using superdrag::WindowMoveWorker;
+    using nekodrag::WindowMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -234,7 +234,7 @@ void TestNewGenerationSupersedesPendingOldDrag() {
 }
 
 void TestFailureResultIsPreserved() {
-    using superdrag::WindowMoveWorker;
+    using nekodrag::WindowMoveWorker;
 
     WindowMoveWorker worker(
         nullptr, 0, [](const WindowMoveWorker::Request&) {
@@ -264,7 +264,7 @@ void TestFailureResultIsPreserved() {
 }
 
 void TestNewGenerationReplacesStaleCompletion() {
-    using superdrag::WindowMoveWorker;
+    using nekodrag::WindowMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -316,8 +316,8 @@ void TestNewGenerationReplacesStaleCompletion() {
 }
 
 void TestFinalReleaseCoordinateWins() {
-    using superdrag::Point;
-    using superdrag::WindowMoveWorker;
+    using nekodrag::Point;
+    using nekodrag::WindowMoveWorker;
 
     std::mutex mutex;
     std::condition_variable changed;
@@ -382,7 +382,7 @@ void TestFinalReleaseCoordinateWins() {
 }
 
 void TestStopAcceptingRejectsNewMoves() {
-    using superdrag::WindowMoveWorker;
+    using nekodrag::WindowMoveWorker;
 
     WindowMoveWorker worker(
         nullptr, 0, [](const WindowMoveWorker::Request& request) {
@@ -415,6 +415,6 @@ int main() {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
     }
-    std::cout << "All SuperDrag window move worker tests passed\n";
+    std::cout << "All NekoDrag window move worker tests passed\n";
     return EXIT_SUCCESS;
 }

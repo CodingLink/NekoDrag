@@ -4,7 +4,7 @@
 
 #include <array>
 
-namespace superdrag::ui {
+namespace nekodrag::ui {
 
 // Logical layout constants for the settings dialog (96-DPI units).
 // All runtime coordinates are produced by Scale(value, dpi).
@@ -132,4 +132,4 @@ struct SettingsLayout {
     }
 };
 
-}  // namespace superdrag::ui
+}  // namespace nekodrag::ui

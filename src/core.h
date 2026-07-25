@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-namespace superdrag {
+namespace nekodrag {
 
 // These values intentionally match the Win32 MOD_* constants.
 constexpr std::uint32_t kModifierAlt = 0x0001;
@@ -13,7 +13,7 @@ constexpr std::uint32_t kAllModifiers =
     kModifierAlt | kModifierControl | kModifierShift | kModifierWin;
 constexpr std::uint32_t kDefaultModifiers = kModifierWin | kModifierAlt;
 
-// Persisted as the DragMode DWORD under HKCU\Software\SuperDrag.
+// Persisted as the DragMode DWORD under HKCU\Software\NekoDrag.
 enum class DragEngineMode : std::uint32_t {
     Automatic = 0,
     NativeOnly = 1,
@@ -85,4 +85,4 @@ NativeMoveCompletionAction DecideNativeMoveCompletion(
     bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept;
 
-}  // namespace superdrag
+}  // namespace nekodrag
