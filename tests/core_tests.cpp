@@ -93,17 +93,20 @@ void TestNativeMoveCompletionDecision() {
     using superdrag::DecideNativeMoveCompletion;
     using superdrag::NativeMoveCompletionAction;
 
-    Expect(DecideNativeMoveCompletion(true, true, false) ==
+    Expect(DecideNativeMoveCompletion(true, false, false) ==
                NativeMoveCompletionAction::Complete,
            "an entered native loop completes even when Escape leaves the "
            "button down");
-    Expect(DecideNativeMoveCompletion(false, false, false) ==
-               NativeMoveCompletionAction::Complete,
-           "a released button completes a quick native request");
     Expect(DecideNativeMoveCompletion(false, true, false) ==
+               NativeMoveCompletionAction::Complete,
+           "an observed release completes a quick native request");
+    Expect(DecideNativeMoveCompletion(false, true, true) ==
+               NativeMoveCompletionAction::Complete,
+           "an observed release never falls back after the grace period");
+    Expect(DecideNativeMoveCompletion(false, false, false) ==
                NativeMoveCompletionAction::WaitForStartEvent,
            "an early return waits for a delayed move-start event");
-    Expect(DecideNativeMoveCompletion(false, true, true) ==
+    Expect(DecideNativeMoveCompletion(false, false, true) ==
                NativeMoveCompletionAction::UseManualFallback,
            "an ignored native request falls back after the grace period");
 }

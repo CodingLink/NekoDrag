@@ -20,14 +20,12 @@ class NativeMoveWorker {
         std::uint64_t generation = 0;
         HWND target = nullptr;
         Point startCursor{};
-        int logicalButtonVirtualKey = VK_LBUTTON;
     };
 
     struct Result {
         std::uint64_t generation = 0;
         HWND target = nullptr;
         bool dispatched = false;
-        bool buttonDownAfterCall = false;
         DWORD error = ERROR_SUCCESS;
         std::uint64_t elapsedUs = 0;
     };

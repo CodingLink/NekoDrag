@@ -38,12 +38,10 @@ constexpr UINT kMessageNativeMoveStarted = WM_APP + 9;
 constexpr UINT kMessageNativeMoveEnded = WM_APP + 10;
 constexpr UINT kMessageNativeButtonReleased = WM_APP + 11;
 constexpr UINT_PTR kRestoreTimer = 1;
-constexpr UINT_PTR kDragWatchdogTimer = 2;
 constexpr UINT_PTR kHookRetryTimer = 3;
 constexpr UINT_PTR kDragReleaseTimer = 4;
 constexpr UINT_PTR kNativeFallbackTimer = 5;
 constexpr UINT_PTR kNativeCompletionTimer = 6;
-constexpr UINT kDragWatchdogIntervalMs = 500;
 constexpr UINT kDragReleaseTimeoutMs = 500;
 constexpr UINT kNativeFallbackGraceMs = 100;
 constexpr UINT kNativeCompletionTimeoutMs = 1000;
@@ -97,14 +95,6 @@ std::wstring ErrorWithCode(const wchar_t* message, DWORD errorCode) {
 
 bool IsKeyDown(int virtualKey) noexcept {
     return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
-}
-
-int LogicalLeftButtonVirtualKey() noexcept {
-    return GetSystemMetrics(SM_SWAPBUTTON) != 0 ? VK_RBUTTON : VK_LBUTTON;
-}
-
-bool IsLogicalLeftButtonDown() noexcept {
-    return IsKeyDown(LogicalLeftButtonVirtualKey());
 }
 
 Point PointFromNative(POINT point) noexcept {
@@ -683,24 +673,6 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                 ScheduleDragUpdate();
                 return 0;
             }
-            if (wParam == kDragWatchdogTimer) {
-                if (drag_.active && !IsLogicalLeftButtonDown()) {
-                    if (IsNativeDrag()) {
-                        NoteNativeButtonReleased();
-                    } else if (!drag_.releasePending) {
-                        // Self-healing for the manual fallback: if the
-                        // release never reached the hook, stop consuming the
-                        // gesture and replace a possibly stale HHOOK.
-                        SD_TRACE(L"watchdog: button already up, ending drag");
-                        EndDrag(L"watchdog-button-up");
-                        if (settings_.enabled) {
-                            RemoveMouseHook();
-                            RequestMouseHookInstall(true);
-                        }
-                    }
-                }
-                return 0;
-            }
             if (wParam == kHookRetryTimer) {
                 KillTimer(window, kHookRetryTimer);
                 AttemptMouseHookInstall();
@@ -1263,8 +1235,6 @@ void SuperDragApp::BeginDragOnMessageThread() {
     }
     drag_.beginPending = false;
     SetForegroundWindow(drag_.target);
-    SetTimer(mainWindow_, kDragWatchdogTimer, kDragWatchdogIntervalMs,
-             nullptr);
     SD_TRACE(L"begin drag generation=%llu target=%p cursor=(%ld,%ld) "
              L"maximized=%d nativeAvailable=%d",
              static_cast<unsigned long long>(drag_.generation), drag_.target,
@@ -1277,8 +1247,7 @@ void SuperDragApp::BeginDragOnMessageThread() {
         nativeEventGeneration_.store(drag_.generation,
                                      std::memory_order_release);
         const NativeMoveWorker::Request request{
-            drag_.generation, drag_.target, drag_.startCursor,
-            LogicalLeftButtonVirtualKey()};
+            drag_.generation, drag_.target, drag_.startCursor};
         if (nativeMoveWorker_->Submit(request)) {
             SD_TRACE(L"native move requested generation=%llu target=%p",
                      static_cast<unsigned long long>(drag_.generation),
@@ -1391,12 +1360,12 @@ void SuperDragApp::HandleNativeMoveCompleted() {
         result.generation == drag_.generation &&
         result.target == drag_.target;
     SD_TRACE(L"native move returned generation=%llu target=%p "
-             L"current=%d dispatched=%d buttonDown=%d error=%lu "
+             L"current=%d dispatched=%d releaseObserved=%d error=%lu "
              L"elapsedUs=%llu",
              static_cast<unsigned long long>(result.generation),
              result.target, currentResult ? 1 : 0,
              result.dispatched ? 1 : 0,
-             result.buttonDownAfterCall ? 1 : 0,
+             currentResult && drag_.nativeButtonReleased ? 1 : 0,
              static_cast<unsigned long>(result.error),
              static_cast<unsigned long long>(result.elapsedUs));
     if (!currentResult) {
@@ -1431,7 +1400,7 @@ void SuperDragApp::HandleNativeMoveCompleted() {
     }
 
     const NativeMoveCompletionAction action = DecideNativeMoveCompletion(
-        drag_.nativeMoveStarted, result.buttonDownAfterCall, false);
+        drag_.nativeMoveStarted, drag_.nativeButtonReleased, false);
     if (action == NativeMoveCompletionAction::Complete) {
         CompleteNativeDrag(drag_.nativeMoveStarted
                                ? L"native-move-complete"
@@ -1473,7 +1442,7 @@ void SuperDragApp::HandleNativeFallbackTimeout() {
         return;
     }
     const NativeMoveCompletionAction action = DecideNativeMoveCompletion(
-        drag_.nativeMoveStarted, IsLogicalLeftButtonDown(), true);
+        drag_.nativeMoveStarted, drag_.nativeButtonReleased, true);
     if (action == NativeMoveCompletionAction::UseManualFallback) {
         BeginManualFallback(true);
     } else {
@@ -1733,7 +1702,6 @@ void SuperDragApp::EndDrag(const wchar_t* reason, bool trace) {
     }
     if (mainWindow_ != nullptr) {
         KillTimer(mainWindow_, kRestoreTimer);
-        KillTimer(mainWindow_, kDragWatchdogTimer);
         KillTimer(mainWindow_, kDragReleaseTimer);
         KillTimer(mainWindow_, kNativeFallbackTimer);
         KillTimer(mainWindow_, kNativeCompletionTimer);

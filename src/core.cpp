@@ -76,9 +76,9 @@ bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept {
 }
 
 NativeMoveCompletionAction DecideNativeMoveCompletion(
-    bool moveSizeStarted, bool logicalButtonDown,
+    bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept {
-    if (moveSizeStarted || !logicalButtonDown) {
+    if (moveSizeStarted || buttonReleaseObserved) {
         return NativeMoveCompletionAction::Complete;
     }
     return startGraceExpired

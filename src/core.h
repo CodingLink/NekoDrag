@@ -63,7 +63,7 @@ Point ComputeRestoredOrigin(Point cursor, Rect maximizedRect,
                             Size restoredSize) noexcept;
 bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept;
 NativeMoveCompletionAction DecideNativeMoveCompletion(
-    bool moveSizeStarted, bool logicalButtonDown,
+    bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept;
 
 }  // namespace superdrag

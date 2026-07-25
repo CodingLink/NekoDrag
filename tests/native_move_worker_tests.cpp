@@ -41,13 +41,12 @@ void TestSingleRequestAndBusyRejection(TestContext context) {
             }
             NativeMoveWorker::Result result;
             result.dispatched = true;
-            result.buttonDownAfterCall = false;
             return result;
         });
 
     Expect(context, worker.Start());
     const HWND target = GetDesktopWindow();
-    Expect(context, worker.Submit({1, target, {10, 20}, VK_LBUTTON}));
+    Expect(context, worker.Submit({1, target, {10, 20}}));
     {
         std::unique_lock<std::mutex> lock(mutex);
         Expect(context,
@@ -69,7 +68,6 @@ void TestSingleRequestAndBusyRejection(TestContext context) {
     Expect(context, result.generation == 1);
     Expect(context, result.target == target);
     Expect(context, result.dispatched);
-    Expect(context, !result.buttonDownAfterCall);
 }
 
 void TestFailureAndGenerationArePreserved(TestContext context) {
@@ -84,7 +82,7 @@ void TestFailureAndGenerationArePreserved(TestContext context) {
     Expect(context, worker.Start());
     const HWND target = GetDesktopWindow();
     Expect(context,
-           worker.Submit({17, target, {-100, 200}, VK_RBUTTON}));
+           worker.Submit({17, target, {-100, 200}}));
 
     NativeMoveWorker::Result result;
     Expect(context, worker.WaitForResult(&result, 2000));
@@ -105,7 +103,7 @@ void TestStopAcceptingRejectsNewRequests(TestContext context) {
     Expect(context, worker.Start());
     worker.StopAccepting();
     Expect(context,
-           !worker.Submit({23, GetDesktopWindow(), {}, VK_LBUTTON}));
+           !worker.Submit({23, GetDesktopWindow(), {}}));
     worker.Stop();
 }
 
@@ -128,7 +126,7 @@ void TestNewGenerationReplacesStaleResult(TestContext context) {
         });
     Expect(context, worker.Start());
     const HWND target = GetDesktopWindow();
-    Expect(context, worker.Submit({40, target, {}, VK_LBUTTON}));
+    Expect(context, worker.Submit({40, target, {}}));
     {
         std::unique_lock<std::mutex> lock(mutex);
         Expect(context,
@@ -140,7 +138,7 @@ void TestNewGenerationReplacesStaleResult(TestContext context) {
         std::chrono::steady_clock::now() + std::chrono::seconds(2);
     bool submitted = false;
     while (!submitted && std::chrono::steady_clock::now() < deadline) {
-        submitted = worker.Submit({41, target, {}, VK_LBUTTON});
+        submitted = worker.Submit({41, target, {}});
         if (!submitted) {
             Sleep(1);
         }
@@ -197,7 +195,7 @@ void TestBlockedRequestHasBoundedStop(TestContext context) {
         });
     Expect(context, worker.Start());
     Expect(context,
-           worker.Submit({29, GetDesktopWindow(), {}, VK_LBUTTON}));
+           worker.Submit({29, GetDesktopWindow(), {}}));
     {
         std::unique_lock<std::mutex> lock(block->mutex);
         Expect(context,

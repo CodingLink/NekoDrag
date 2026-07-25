@@ -119,8 +119,8 @@ WH_MOUSE_LL
 - `IsExactModifierMatch()` 要求没有额外修饰键。
 - `NativeMoveWorker` 同步调用 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`；调用会
   阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
-- 低级钩子回调早于 Windows 更新异步按键状态；工作线程在发送原生
-  消息前最多等待 50ms，避免将真实按下误判为“已释放”。
+- 初始左键按下被低级钩子吞掉后，`GetAsyncKeyState` 不会反映这次按下；
+  原生工作线程会直接发送消息，拖动生命周期以钩子实际观察到的释放事件为准。
 - 原生循环开始后 SuperDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
   跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
 - 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。
@@ -139,7 +139,7 @@ WH_MOUSE_LL
 
 不要把原生启动改回异步 `PostMessage(WM_NCLBUTTONDOWN)`：真实左键按下已经被
 钩子吞掉，异步投递无法可靠建立系统移动循环。当前方案必须在独立线程使用同步
-`SendMessage`，并保持物理按键状态直到目标窗口进入 `SC_MOVE`。
+`SendMessage`，并使用钩子观察到的按键释放结束或回退拖动。
 
 不要在钩子/UI 线程直接同步 `SetWindowPos`，否则目标繁忙会阻塞低级钩子并触发
 `LowLevelHooksTimeout`。也不要在每个鼠标事件上提交 `SWP_ASYNCWINDOWPOS`；实际
