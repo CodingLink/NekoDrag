@@ -4,7 +4,7 @@
 import os
 import struct
 
-ACCENT = (0x00, 0x78, 0xD4)  # #0078D4 as (B, G, R)
+ACCENT = (0xD4, 0x78, 0x00)  # #0078D4 as (B, G, R)
 WHITE = (0xFF, 0xFF, 0xFF)
 TRANSPARENT = (0x00, 0x00, 0x00, 0x00)
 
@@ -49,12 +49,11 @@ def render_reference(size):
                 ref_pixels[idx:idx + 4] = TRANSPARENT
 
     # Downsample by averaging blocks
-    scale = ref // size
     out = bytearray(size * size * 4)
     for y in range(size):
         for x in range(size):
-            sx0, sx1 = x * scale, (x + 1) * scale
-            sy0, sy1 = y * scale, (y + 1) * scale
+            sx0, sx1 = x * ref // size, (x + 1) * ref // size
+            sy0, sy1 = y * ref // size, (y + 1) * ref // size
             b = g = r = a = 0
             count = 0
             for sy in range(sy0, sy1):

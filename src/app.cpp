@@ -10,6 +10,7 @@
 #include <shellapi.h>
 
 #include <algorithm>
+#include <array>
 #include <cstdarg>
 #include <cstdint>
 #include <cwchar>
@@ -30,9 +31,15 @@ constexpr UINT kMessageBeginDrag = WM_APP + 2;
 constexpr UINT kMessageUpdateDrag = WM_APP + 3;
 constexpr UINT kMessageOpenSettings = WM_APP + 4;
 constexpr UINT kMessagePrivilegeHint = WM_APP + 5;
+constexpr UINT kMessageEnsureMouseHook = WM_APP + 6;
+constexpr UINT kMessageMoveCompleted = WM_APP + 7;
 constexpr UINT_PTR kRestoreTimer = 1;
 constexpr UINT_PTR kDragWatchdogTimer = 2;
+constexpr UINT_PTR kHookRetryTimer = 3;
+constexpr UINT_PTR kDragReleaseTimer = 4;
 constexpr UINT kDragWatchdogIntervalMs = 500;
+constexpr UINT kDragReleaseTimeoutMs = 500;
+constexpr std::array<UINT, 3> kHookRetryDelaysMs{250, 1000, 3000};
 constexpr unsigned kMaxRestoreAttempts = 30;
 
 constexpr UINT kTrayIconId = 1;
@@ -57,14 +64,15 @@ SuperDragApp* gApp = nullptr;
 
 #ifdef SUPERDRAG_TRACE
 void TraceDragState(const wchar_t* format, ...) {
-    wchar_t buffer[256];
+    wchar_t message[256]{};
     va_list args;
     va_start(args, format);
-    _vsnwprintf_s(buffer, _TRUNCATE, format, args);
+    _vsnwprintf_s(message, std::size(message), _TRUNCATE, format, args);
     va_end(args);
-    OutputDebugStringW(L"[SuperDrag] ");
-    OutputDebugStringW(buffer);
-    OutputDebugStringW(L"\n");
+
+    wchar_t line[288]{};
+    swprintf_s(line, std::size(line), L"[SuperDrag] %ls\n", message);
+    OutputDebugStringW(line);
 }
 #define SD_TRACE(...) TraceDragState(__VA_ARGS__)
 #else
@@ -81,6 +89,18 @@ std::wstring ErrorWithCode(const wchar_t* message, DWORD errorCode) {
 
 bool IsKeyDown(int virtualKey) noexcept {
     return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+}
+
+bool IsLogicalLeftButtonDown() noexcept {
+    const int physicalButton = GetSystemMetrics(SM_SWAPBUTTON) != 0
+                                   ? VK_RBUTTON
+                                   : VK_LBUTTON;
+    return IsKeyDown(physicalButton);
+}
+
+Point PointFromNative(POINT point) noexcept {
+    return {static_cast<std::int32_t>(point.x),
+            static_cast<std::int32_t>(point.y)};
 }
 
 bool QueryProcessIntegrity(HANDLE process, DWORD* integrityLevel) {
@@ -243,7 +263,8 @@ bool SuperDragApp::Initialize(std::wstring* error) {
     }
 
     taskbarCreatedMessage_ = RegisterWindowMessageW(L"TaskbarCreated");
-    if (!RegisterWindowClasses(error) || !CreateMainWindow(error)) {
+    if (!RegisterWindowClasses(error) || !CreateMainWindow(error) ||
+        !StartMoveWorker(error)) {
         return false;
     }
     if (!AddTrayIcon()) {
@@ -270,15 +291,26 @@ bool SuperDragApp::Initialize(std::wstring* error) {
     }
 
     if (settings_.enabled) {
-        std::wstring hookError;
-        if (!InstallMouseHook(&hookError)) {
-            settings_.enabled = false;
-            ShowTrayNotification(L"SuperDrag", hookError.c_str(), NIIF_ERROR);
-        }
+        RequestMouseHookInstall(true);
+    } else {
+        hookRuntimeState_ = HookRuntimeState::Stopped;
     }
 
     if (firstLaunch) {
         ShowSettingsWindow();
+    }
+    return true;
+}
+
+bool SuperDragApp::StartMoveWorker(std::wstring* error) {
+    moveWorker_ =
+        std::make_unique<WindowMoveWorker>(mainWindow_, kMessageMoveCompleted);
+    if (!moveWorker_->Start()) {
+        moveWorker_.reset();
+        if (error != nullptr) {
+            *error = L"无法启动窗口移动线程。";
+        }
+        return false;
     }
     return true;
 }
@@ -327,37 +359,73 @@ bool SuperDragApp::CreateSettingsWindow(std::wstring* error) {
         return true;
     }
 
-    const UINT dpi = GetDpiForSystem();
-    const int client_width = ui::SettingsLayout::Scale(
-        ui::SettingsLayout::kMinClientWidth, dpi);
-    const int client_height = ui::SettingsLayout::Scale(
-        ui::SettingsLayout::kMinClientHeight, dpi);
-    RECT windowRect{0, 0, client_width, client_height};
     const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
                         WS_THICKFRAME | WS_CLIPCHILDREN;
     const DWORD extendedStyle = WS_EX_DLGMODALFRAME | WS_EX_CONTROLPARENT;
-    AdjustWindowRectExForDpi(&windowRect, style, FALSE, extendedStyle, dpi);
 
     POINT cursor{};
     GetCursorPos(&cursor);
     HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
     MONITORINFO monitorInfo{};
     monitorInfo.cbSize = sizeof(monitorInfo);
-    GetMonitorInfoW(monitor, &monitorInfo);
-    const int width = windowRect.right - windowRect.left;
-    const int height = windowRect.bottom - windowRect.top;
-    const int x = monitorInfo.rcWork.left +
-                  (monitorInfo.rcWork.right - monitorInfo.rcWork.left - width) /
-                      2;
-    const int y = monitorInfo.rcWork.top +
-                  (monitorInfo.rcWork.bottom - monitorInfo.rcWork.top - height) /
-                      2;
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        *error = ErrorWithCode(L"无法获取显示器信息", GetLastError());
+        return false;
+    }
+
+    auto windowRectForDpi = [style, extendedStyle](UINT dpi) {
+        const int clientWidth = ui::SettingsLayout::Scale(
+            ui::SettingsLayout::kMinClientWidth, dpi);
+        const int clientHeight = ui::SettingsLayout::Scale(
+            ui::SettingsLayout::kMinClientHeight, dpi);
+        RECT rect{0, 0, clientWidth, clientHeight};
+        AdjustWindowRectExForDpi(&rect, style, FALSE, extendedStyle, dpi);
+        return rect;
+    };
+
+    const UINT bootstrapDpi = GetDpiForSystem();
+    RECT windowRect = windowRectForDpi(bootstrapDpi);
+    const int workLeft = static_cast<int>(monitorInfo.rcWork.left);
+    const int workTop = static_cast<int>(monitorInfo.rcWork.top);
+    const int workWidth = static_cast<int>(
+        monitorInfo.rcWork.right - monitorInfo.rcWork.left);
+    const int workHeight = static_cast<int>(
+        monitorInfo.rcWork.bottom - monitorInfo.rcWork.top);
+    const int bootstrapWidth =
+        static_cast<int>(windowRect.right - windowRect.left);
+    const int bootstrapHeight =
+        static_cast<int>(windowRect.bottom - windowRect.top);
+    const int width = std::max(1, std::min(bootstrapWidth, workWidth));
+    const int height = std::max(1, std::min(bootstrapHeight, workHeight));
+    const int x = workLeft + (workWidth - width) / 2;
+    const int y = workTop + (workHeight - height) / 2;
 
     settingsWindow_ = CreateWindowExW(
         extendedStyle, kSettingsWindowClass, L"SuperDrag 设置", style, x, y,
         width, height, mainWindow_, nullptr, instance_, this);
     if (settingsWindow_ == nullptr) {
         *error = ErrorWithCode(L"创建设置窗口失败", GetLastError());
+        return false;
+    }
+
+    // The proposed coordinates place the hidden window on the cursor's
+    // monitor. Query its actual per-monitor DPI, then size and center it using
+    // that DPI before the first ShowWindow call.
+    const UINT queriedDpi = GetDpiForWindow(settingsWindow_);
+    const UINT windowDpi = queriedDpi != 0 ? queriedDpi : bootstrapDpi;
+    windowRect = windowRectForDpi(windowDpi);
+    const int desiredWidth =
+        static_cast<int>(windowRect.right - windowRect.left);
+    const int desiredHeight =
+        static_cast<int>(windowRect.bottom - windowRect.top);
+    const int desiredX = workLeft + (workWidth - desiredWidth) / 2;
+    const int desiredY = workTop + (workHeight - desiredHeight) / 2;
+    if (!SetWindowPos(settingsWindow_, nullptr, desiredX, desiredY,
+                      desiredWidth, desiredHeight,
+                      SWP_NOZORDER | SWP_NOACTIVATE)) {
+        const DWORD resizeError = GetLastError();
+        DestroyWindow(settingsWindow_);
+        *error = ErrorWithCode(L"调整设置窗口大小失败", resizeError);
         return false;
     }
     return true;
@@ -369,8 +437,18 @@ void SuperDragApp::Shutdown() {
     }
     shuttingDown_ = true;
 
-    EndDrag();
+    if (moveWorker_ != nullptr) {
+        moveWorker_->StopAccepting();
+    }
+    EndDrag(L"shutdown");
+    ++dragGenerationCounter_;
+    CancelMouseHookRetry();
     RemoveMouseHook();
+    hookRuntimeState_ = HookRuntimeState::Stopped;
+    if (moveWorker_ != nullptr) {
+        moveWorker_->Stop();
+        moveWorker_.reset();
+    }
     RemoveTrayIcon();
     if (settingsWindow_ != nullptr && IsWindow(settingsWindow_)) {
         DestroyWindow(settingsWindow_);
@@ -455,11 +533,18 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
         case kMessageUpdateDrag:
             ApplyLatestDragPosition();
             return 0;
+        case kMessageMoveCompleted:
+            HandleMoveCompleted();
+            return 0;
         case kMessageOpenSettings:
             ShowSettingsWindow();
             return 0;
         case kMessagePrivilegeHint:
             ShowPrivilegeHintOnce();
+            return 0;
+        case kMessageEnsureMouseHook:
+            hookInstallMessagePending_ = false;
+            AttemptMouseHookInstall();
             return 0;
         case WM_TIMER:
             if (wParam == kRestoreTimer) {
@@ -468,13 +553,34 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                 return 0;
             }
             if (wParam == kDragWatchdogTimer) {
-                // Self-healing: if the physical button was released but the
-                // release event never reached the hook (e.g. the hook was
+                // Self-healing: if the logical left button was released but
+                // the release event never reached the hook (e.g. the hook was
                 // skipped after a timeout), end the drag instead of
                 // swallowing clicks forever.
-                if (drag_.active && !IsKeyDown(VK_LBUTTON)) {
+                if (drag_.active && !drag_.releasePending &&
+                    !IsLogicalLeftButtonDown()) {
                     SD_TRACE(L"watchdog: button already up, ending drag");
-                    EndDrag();
+                    EndDrag(L"watchdog-button-up");
+                    // Windows can silently remove a low-level hook after a
+                    // timeout while leaving our HHOOK value non-null. Replace
+                    // it after a missed release so future drags still work.
+                    if (settings_.enabled) {
+                        RemoveMouseHook();
+                        RequestMouseHookInstall(true);
+                    }
+                }
+                return 0;
+            }
+            if (wParam == kHookRetryTimer) {
+                KillTimer(window, kHookRetryTimer);
+                AttemptMouseHookInstall();
+                return 0;
+            }
+            if (wParam == kDragReleaseTimer) {
+                KillTimer(window, kDragReleaseTimer);
+                if (drag_.active && drag_.releasePending) {
+                    SD_TRACE(L"end drag: final move timed out");
+                    EndDrag(L"final-move-timeout");
                 }
                 return 0;
             }
@@ -506,9 +612,15 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
             LayoutSettingsControls(GetDpiForWindow(window));
             ApplyThemeToSettingsWindow();
             return 0;
+        case DM_GETDEFID:
+            return MAKELRESULT(kControlSave, DC_HASDEFID);
         case WM_COMMAND: {
             const int id = LOWORD(wParam);
             const int code = HIWORD(wParam);
+            if (id == IDCANCEL) {
+                ShowWindow(window, SW_HIDE);
+                return 0;
+            }
             if (code == BN_CLICKED) {
                 switch (id) {
                     case kControlEnabled:
@@ -671,14 +783,30 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-bool SuperDragApp::InstallMouseHook(std::wstring* error) {
+bool SuperDragApp::InstallMouseHook(std::wstring* error, DWORD* errorCode) {
     if (mouseHook_ != nullptr) {
+        if (errorCode != nullptr) {
+            *errorCode = ERROR_SUCCESS;
+        }
         return true;
     }
+    SetLastError(ERROR_SUCCESS);
     mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, MouseHookProc, instance_, 0);
     if (mouseHook_ == nullptr) {
-        *error = ErrorWithCode(L"无法启用全局鼠标监听", GetLastError());
+        DWORD code = GetLastError();
+        if (code == ERROR_SUCCESS) {
+            code = ERROR_GEN_FAILURE;
+        }
+        if (errorCode != nullptr) {
+            *errorCode = code;
+        }
+        if (error != nullptr) {
+            *error = ErrorWithCode(L"无法启用全局鼠标监听", code);
+        }
         return false;
+    }
+    if (errorCode != nullptr) {
+        *errorCode = ERROR_SUCCESS;
     }
     return true;
 }
@@ -688,6 +816,110 @@ void SuperDragApp::RemoveMouseHook() {
         UnhookWindowsHookEx(mouseHook_);
         mouseHook_ = nullptr;
     }
+}
+
+void SuperDragApp::RequestMouseHookInstall(bool resetRetries) {
+    if (resetRetries) {
+        hookRetryIndex_ = 0;
+    }
+    if (shuttingDown_ || !settings_.enabled || mainWindow_ == nullptr) {
+        CancelMouseHookRetry();
+        hookRuntimeState_ = HookRuntimeState::Stopped;
+        return;
+    }
+    if (mouseHook_ != nullptr) {
+        hookRuntimeState_ = HookRuntimeState::Active;
+        UpdateHookStatusInSettings();
+        return;
+    }
+
+    KillTimer(mainWindow_, kHookRetryTimer);
+    hookRuntimeState_ = HookRuntimeState::Starting;
+    UpdateHookStatusInSettings();
+    if (hookInstallMessagePending_) {
+        return;
+    }
+    if (PostMessageW(mainWindow_, kMessageEnsureMouseHook, 0, 0)) {
+        hookInstallMessagePending_ = true;
+        SD_TRACE(L"mouse hook install queued");
+        return;
+    }
+
+    DWORD code = GetLastError();
+    if (code == ERROR_SUCCESS) {
+        code = ERROR_GEN_FAILURE;
+    }
+    HandleMouseHookInstallFailure(
+        code, ErrorWithCode(L"无法安排全局鼠标监听", code));
+}
+
+void SuperDragApp::AttemptMouseHookInstall() {
+    if (shuttingDown_ || !settings_.enabled || mainWindow_ == nullptr) {
+        hookRuntimeState_ = HookRuntimeState::Stopped;
+        return;
+    }
+    if (mouseHook_ != nullptr) {
+        hookRuntimeState_ = HookRuntimeState::Active;
+        hookRetryIndex_ = 0;
+        lastHookError_ = ERROR_SUCCESS;
+        lastHookErrorText_.clear();
+        UpdateHookStatusInSettings();
+        return;
+    }
+
+    std::wstring error;
+    DWORD errorCode = ERROR_SUCCESS;
+    SD_TRACE(L"installing mouse hook attempt=%llu",
+             static_cast<unsigned long long>(hookRetryIndex_ + 1));
+    if (InstallMouseHook(&error, &errorCode)) {
+        hookRuntimeState_ = HookRuntimeState::Active;
+        hookRetryIndex_ = 0;
+        lastHookError_ = ERROR_SUCCESS;
+        lastHookErrorText_.clear();
+        SD_TRACE(L"mouse hook installed handle=%p", mouseHook_);
+        UpdateHookStatusInSettings();
+        return;
+    }
+    HandleMouseHookInstallFailure(errorCode, error);
+}
+
+void SuperDragApp::HandleMouseHookInstallFailure(
+    DWORD errorCode, const std::wstring& error) {
+    lastHookError_ = errorCode;
+    lastHookErrorText_ = error;
+    SD_TRACE(L"mouse hook install failed error=%lu retryIndex=%llu",
+             static_cast<unsigned long>(errorCode),
+             static_cast<unsigned long long>(hookRetryIndex_));
+
+    if (!shuttingDown_ && settings_.enabled && mainWindow_ != nullptr &&
+        hookRetryIndex_ < kHookRetryDelaysMs.size()) {
+        const UINT delay = kHookRetryDelaysMs[hookRetryIndex_++];
+        if (SetTimer(mainWindow_, kHookRetryTimer, delay, nullptr) != 0) {
+            hookRuntimeState_ = HookRuntimeState::Starting;
+            SD_TRACE(L"mouse hook retry scheduled delay=%u", delay);
+            SetHookStatus(L"正在重试启用窗口拖动；上次失败：" + error,
+                          true);
+            return;
+        }
+    }
+
+    hookRuntimeState_ = HookRuntimeState::Failed;
+    SetHookStatus(error + L"。请从托盘菜单重试启用。", true);
+    ShowTrayNotification(L"SuperDrag", lastHookErrorText_.c_str(),
+                         NIIF_ERROR);
+}
+
+void SuperDragApp::CancelMouseHookRetry() {
+    if (mainWindow_ != nullptr) {
+        KillTimer(mainWindow_, kHookRetryTimer);
+    }
+    hookInstallMessagePending_ = false;
+    hookRetryIndex_ = 0;
+}
+
+bool SuperDragApp::IsMouseHookActive() const noexcept {
+    return hookRuntimeState_ == HookRuntimeState::Active &&
+           mouseHook_ != nullptr;
 }
 
 std::uint32_t SuperDragApp::CurrentModifierMask() const noexcept {
@@ -772,21 +1004,34 @@ bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
     drag_ = DragState{};
     drag_.active = true;
     drag_.beginPending = true;
+    drag_.generation = ++dragGenerationCounter_;
+    if (drag_.generation == 0) {
+        drag_.generation = ++dragGenerationCounter_;
+    }
     drag_.target = target;
     drag_.startCursor = cursor;
     drag_.latestCursor = cursor;
-    drag_.grabOffset = {cursor.x - windowRect.left,
-                        cursor.y - windowRect.top};
-    drag_.lastAppliedOrigin = {windowRect.left, windowRect.top};
-    drag_.maximizedRect = {windowRect.left, windowRect.top, windowRect.right,
-                           windowRect.bottom};
+    const Point windowOrigin = PointFromNative(
+        POINT{windowRect.left, windowRect.top});
+    drag_.grabOffset = {cursor.x - windowOrigin.x,
+                        cursor.y - windowOrigin.y};
+    drag_.lastAppliedOrigin = windowOrigin;
+    drag_.lastRequestedOrigin = drag_.lastAppliedOrigin;
+    drag_.maximizedRect = {
+        static_cast<std::int32_t>(windowRect.left),
+        static_cast<std::int32_t>(windowRect.top),
+        static_cast<std::int32_t>(windowRect.right),
+        static_cast<std::int32_t>(windowRect.bottom),
+    };
     drag_.restoring = IsZoomed(target) != FALSE;
 
     if (!PostMessageW(mainWindow_, kMessageBeginDrag, 0, 0)) {
-        drag_ = DragState{};
+        EndDrag(L"begin-message-post-failed");
         return false;
     }
-    SD_TRACE(L"begin drag target=%p cursor=(%ld,%ld) maximized=%d", target,
+    SD_TRACE(L"begin drag generation=%llu target=%p cursor=(%ld,%ld) "
+             L"maximized=%d",
+             static_cast<unsigned long long>(drag_.generation), target,
              static_cast<long>(cursor.x), static_cast<long>(cursor.y),
              drag_.restoring ? 1 : 0);
     SetTimer(mainWindow_, kDragWatchdogTimer, kDragWatchdogIntervalMs,
@@ -811,44 +1056,52 @@ LRESULT SuperDragApp::HandleMouseHook(
     switch (message) {
         case WM_LBUTTONDOWN:
             if (drag_.active) {
-                return 1;
+                if (!drag_.releasePending) {
+                    return 1;
+                }
+                // A completed gesture must not consume a subsequent click
+                // merely because its final move is still in flight.
+                EndDrag(L"new-button-down-after-release");
             }
-            if (settings_.enabled && IsConfiguredChordDown()) {
+            if (IsMouseHookActive() && IsConfiguredChordDown()) {
                 bool restricted = false;
                 const HWND target =
                     ResolveDragTarget(mouseInfo->pt, &restricted);
                 if (restricted) {
                     PostMessageW(mainWindow_, kMessagePrivilegeHint, 0, 0);
                 } else if (target != nullptr &&
-                           BeginDragFromHook(
-                               target, {mouseInfo->pt.x, mouseInfo->pt.y})) {
+                           BeginDragFromHook(target,
+                                             PointFromNative(mouseInfo->pt))) {
                     return 1;
                 }
             }
             break;
         case WM_MOUSEMOVE:
             if (drag_.active) {
-                drag_.latestCursor = {mouseInfo->pt.x, mouseInfo->pt.y};
+                if (drag_.releasePending) {
+                    break;
+                }
+                drag_.latestCursor = PointFromNative(mouseInfo->pt);
                 if (IsDragPositionReady()) {
-                    // Apply immediately at input rate. The async request
-                    // never blocks this thread on a busy target, and the
-                    // per-target FIFO queue keeps positions ordered.
-                    MoveTargetToLatestCursor();
+                    SubmitLatestDragPosition(false);
                 } else {
                     ScheduleDragUpdate();
                 }
-                return 1;
+                // The low-level hook runs before Windows applies the pointer
+                // movement. Suppressing WM_MOUSEMOVE keeps the system cursor
+                // near its previous position, so later absolute hook points
+                // oscillate around the drag origin and the window jitters.
+                // The button-down was already suppressed, so forwarding only
+                // movement updates the cursor without starting a target
+                // control interaction.
+                break;
             }
             break;
         case WM_LBUTTONUP:
             if (drag_.active) {
-                drag_.latestCursor = {mouseInfo->pt.x, mouseInfo->pt.y};
+                drag_.latestCursor = PointFromNative(mouseInfo->pt);
                 if (IsDragPositionReady()) {
-                    MoveTargetToLatestCursor();
-                    SD_TRACE(L"end drag (button up) at (%ld,%ld)",
-                             static_cast<long>(mouseInfo->pt.x),
-                             static_cast<long>(mouseInfo->pt.y));
-                    EndDrag();
+                    BeginDragRelease();
                 } else {
                     drag_.releasePending = true;
                     ScheduleDragUpdate();
@@ -866,7 +1119,7 @@ LRESULT SuperDragApp::HandleMouseHook(
 void SuperDragApp::BeginDragOnMessageThread() {
     if (!drag_.active || !drag_.beginPending ||
         !IsWindow(drag_.target)) {
-        EndDrag();
+        EndDrag(L"target-invalid-before-begin");
         return;
     }
     drag_.beginPending = false;
@@ -895,37 +1148,165 @@ bool SuperDragApp::IsDragPositionReady() const noexcept {
            !drag_.releasePending && !drag_.movementFailed;
 }
 
-void SuperDragApp::MoveTargetToLatestCursor() {
+bool SuperDragApp::SubmitLatestDragPosition(bool finalRequest) {
     if (!IsWindow(drag_.target)) {
         SD_TRACE(L"end drag: target window gone");
-        EndDrag();
-        return;
+        EndDrag(L"target-window-gone");
+        return false;
     }
+    if (moveWorker_ == nullptr) {
+        FailCurrentDrag(false, ERROR_INVALID_STATE);
+        return false;
+    }
+
     const Point origin =
         ComputeDraggedOrigin(drag_.latestCursor, drag_.grabOffset);
-    if (origin.x == drag_.lastAppliedOrigin.x &&
-        origin.y == drag_.lastAppliedOrigin.y) {
-        return;
+    const bool matchesLastApplied =
+        origin.x == drag_.lastAppliedOrigin.x &&
+        origin.y == drag_.lastAppliedOrigin.y;
+    const bool matchesLastRequested =
+        drag_.moveRequested && origin.x == drag_.lastRequestedOrigin.x &&
+        origin.y == drag_.lastRequestedOrigin.y;
+
+    if (finalRequest) {
+        drag_.finalRequestedOrigin = origin;
+        if (matchesLastApplied &&
+            (!drag_.moveRequested || matchesLastRequested)) {
+            SD_TRACE(L"end drag: final position already applied");
+            EndDrag(L"final-already-applied");
+            return true;
+        }
+        drag_.finalMoveRequested = true;
+        if (matchesLastRequested) {
+            if (SetTimer(mainWindow_, kDragReleaseTimer,
+                         kDragReleaseTimeoutMs, nullptr) == 0) {
+                SD_TRACE(L"end drag: unable to start release timer");
+                EndDrag(L"release-timer-failed");
+                return false;
+            }
+            return true;
+        }
+    } else if ((!drag_.moveRequested && matchesLastApplied) ||
+               matchesLastRequested) {
+        return true;
     }
-    if (!SetWindowPos(drag_.target, nullptr, origin.x, origin.y, 0, 0,
-                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
-                          SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS |
-                          SWP_DEFERERASE)) {
-        SD_TRACE(L"SetWindowPos failed, error=%lu", GetLastError());
-        FailCurrentDrag(true);
-        return;
+
+    const WindowMoveWorker::Request request{drag_.generation, drag_.target,
+                                            origin};
+    if (!moveWorker_->Submit(request)) {
+        FailCurrentDrag(false, ERROR_INVALID_STATE);
+        return false;
     }
-    drag_.lastAppliedOrigin = origin;
+    drag_.moveRequested = true;
+    drag_.lastRequestedOrigin = origin;
+
+    if (finalRequest &&
+        SetTimer(mainWindow_, kDragReleaseTimer, kDragReleaseTimeoutMs,
+                 nullptr) == 0) {
+        SD_TRACE(L"end drag: unable to start release timer");
+        EndDrag(L"release-timer-failed");
+        return false;
+    }
 #ifdef SUPERDRAG_TRACE
     const DWORD now = GetTickCount();
     if (now - lastMoveTraceTick_ >= 100) {
         lastMoveTraceTick_ = now;
-        SD_TRACE(L"move cursor=(%ld,%ld) origin=(%ld,%ld)",
+        SD_TRACE(L"submit move generation=%llu cursor=(%ld,%ld) "
+                 L"origin=(%ld,%ld) final=%d",
+                 static_cast<unsigned long long>(drag_.generation),
                  static_cast<long>(drag_.latestCursor.x),
                  static_cast<long>(drag_.latestCursor.y),
-                 static_cast<long>(origin.x), static_cast<long>(origin.y));
+                 static_cast<long>(origin.x), static_cast<long>(origin.y),
+                 finalRequest ? 1 : 0);
     }
 #endif
+    return true;
+}
+
+void SuperDragApp::BeginDragRelease() {
+    if (!drag_.active) {
+        return;
+    }
+    drag_.releasePending = true;
+    SD_TRACE(L"release requested generation=%llu cursor=(%ld,%ld)",
+             static_cast<unsigned long long>(drag_.generation),
+             static_cast<long>(drag_.latestCursor.x),
+             static_cast<long>(drag_.latestCursor.y));
+    if (drag_.beginPending || drag_.restoring) {
+        ScheduleDragUpdate();
+        return;
+    }
+    if (drag_.movementFailed) {
+        EndDrag(L"move-failed-before-release");
+        return;
+    }
+    SubmitLatestDragPosition(true);
+}
+
+void SuperDragApp::HandleMoveCompleted() {
+    if (moveWorker_ == nullptr) {
+        return;
+    }
+    WindowMoveWorker::Result result;
+    if (!moveWorker_->TakeLatestResult(&result)) {
+        return;
+    }
+
+    const bool currentResult =
+        drag_.active && result.generation == drag_.generation &&
+        result.target == drag_.target;
+    const bool completesFinalMove =
+        currentResult && drag_.releasePending && drag_.finalMoveRequested &&
+        result.requestedOrigin.x == drag_.finalRequestedOrigin.x &&
+        result.requestedOrigin.y == drag_.finalRequestedOrigin.y;
+#ifdef SUPERDRAG_TRACE
+    const DWORD traceTick = GetTickCount();
+    if (!currentResult || !result.success || completesFinalMove ||
+        traceTick - lastMoveCompletionTraceTick_ >= 100) {
+        lastMoveCompletionTraceTick_ = traceTick;
+        SD_TRACE(L"move completed generation=%llu requested=(%ld,%ld) "
+                 L"actual=(%ld,%ld) known=%d success=%d error=%lu "
+                 L"elapsed=%llu coalesced=%llu",
+                 static_cast<unsigned long long>(result.generation),
+                 static_cast<long>(result.requestedOrigin.x),
+                 static_cast<long>(result.requestedOrigin.y),
+                 static_cast<long>(result.actualOrigin.x),
+                 static_cast<long>(result.actualOrigin.y),
+                 result.actualPositionKnown ? 1 : 0,
+                 result.success ? 1 : 0,
+                 static_cast<unsigned long>(result.error),
+                 static_cast<unsigned long long>(result.elapsedMs),
+                 static_cast<unsigned long long>(result.coalescedRequests));
+    }
+#endif
+
+    if (!currentResult) {
+        return;
+    }
+    if (!result.success) {
+        const bool privilegeFailure =
+            result.error == ERROR_ACCESS_DENIED ||
+            result.error == ERROR_PRIVILEGE_NOT_HELD;
+        if (!privilegeFailure) {
+            std::wstring message;
+            if (result.error == ERROR_TIMEOUT) {
+                message = L"目标窗口无响应，已停止当前拖动。";
+            } else {
+                message = ErrorWithCode(L"无法移动目标窗口", result.error);
+            }
+            ShowTrayNotification(L"SuperDrag", message.c_str(), NIIF_WARNING);
+        }
+        FailCurrentDrag(privilegeFailure, result.error);
+        return;
+    }
+
+    drag_.lastAppliedOrigin = result.actualPositionKnown
+                                  ? result.actualOrigin
+                                  : result.requestedOrigin;
+    if (completesFinalMove) {
+        KillTimer(mainWindow_, kDragReleaseTimer);
+        EndDrag(L"final-move-complete");
+    }
 }
 
 void SuperDragApp::ApplyLatestDragPosition() {
@@ -934,12 +1315,12 @@ void SuperDragApp::ApplyLatestDragPosition() {
         return;
     }
     if (!IsWindow(drag_.target)) {
-        EndDrag();
+        EndDrag(L"target-window-gone");
         return;
     }
     if (drag_.movementFailed) {
         if (drag_.releasePending) {
-            EndDrag();
+            EndDrag(L"move-failed");
         }
         return;
     }
@@ -959,45 +1340,64 @@ void SuperDragApp::ApplyLatestDragPosition() {
             FailCurrentDrag(true);
             return;
         }
-        const Size restoredSize{restoredRect.right - restoredRect.left,
-                                restoredRect.bottom - restoredRect.top};
+        const Size restoredSize{
+            static_cast<std::int32_t>(restoredRect.right - restoredRect.left),
+            static_cast<std::int32_t>(restoredRect.bottom - restoredRect.top),
+        };
         const Point restoredOrigin = ComputeRestoredOrigin(
             drag_.startCursor, drag_.maximizedRect, restoredSize);
         drag_.grabOffset = {drag_.startCursor.x - restoredOrigin.x,
                             drag_.startCursor.y - restoredOrigin.y};
-        drag_.lastAppliedOrigin = restoredOrigin;
+        drag_.lastAppliedOrigin = PointFromNative(
+            POINT{restoredRect.left, restoredRect.top});
+        drag_.lastRequestedOrigin = drag_.lastAppliedOrigin;
+        drag_.moveRequested = false;
         drag_.restoring = false;
-        SD_TRACE(L"maximized window restored at (%ld,%ld)",
+        SD_TRACE(L"maximized window restored actual=(%ld,%ld) target=(%ld,%ld)",
+                 static_cast<long>(restoredRect.left),
+                 static_cast<long>(restoredRect.top),
                  static_cast<long>(restoredOrigin.x),
                  static_cast<long>(restoredOrigin.y));
     }
 
-    MoveTargetToLatestCursor();
-
     if (drag_.releasePending) {
-        SD_TRACE(L"end drag (pending release) at (%ld,%ld)",
-                 static_cast<long>(drag_.latestCursor.x),
-                 static_cast<long>(drag_.latestCursor.y));
-        EndDrag();
+        SubmitLatestDragPosition(true);
+    } else {
+        SubmitLatestDragPosition(false);
     }
 }
 
-void SuperDragApp::EndDrag() {
+void SuperDragApp::EndDrag(const wchar_t* reason) {
+    const std::uint64_t generation = drag_.generation;
+    if (drag_.active) {
+        SD_TRACE(L"end drag generation=%llu target=%p reason=%ls",
+                 static_cast<unsigned long long>(generation), drag_.target,
+                 reason != nullptr ? reason : L"unspecified");
+    }
     if (mainWindow_ != nullptr) {
         KillTimer(mainWindow_, kRestoreTimer);
         KillTimer(mainWindow_, kDragWatchdogTimer);
+        KillTimer(mainWindow_, kDragReleaseTimer);
+    }
+    if (moveWorker_ != nullptr && generation != 0) {
+        moveWorker_->CancelGeneration(generation);
     }
     drag_ = DragState{};
 }
 
-void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint) {
-    SD_TRACE(L"drag failed, hint=%d", showPrivilegeHint ? 1 : 0);
+void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint, DWORD error) {
+    SD_TRACE(L"drag failed, hint=%d error=%lu",
+             showPrivilegeHint ? 1 : 0,
+             static_cast<unsigned long>(error));
     drag_.movementFailed = true;
+    if (moveWorker_ != nullptr) {
+        moveWorker_->CancelGeneration(drag_.generation);
+    }
     if (showPrivilegeHint && mainWindow_ != nullptr) {
         PostMessageW(mainWindow_, kMessagePrivilegeHint, 0, 0);
     }
     if (drag_.releasePending) {
-        EndDrag();
+        EndDrag(L"move-failed");
     }
 }
 
@@ -1052,9 +1452,19 @@ void SuperDragApp::ShowTrayMenu(POINT screenPoint) {
         return;
     }
 
-    AppendMenuW(menu, MF_STRING | (settings_.enabled ? MF_CHECKED : 0),
-                kMenuToggleEnabled,
-                settings_.enabled ? L"暂停" : L"启用");
+    UINT toggleFlags = MF_STRING;
+    const wchar_t* toggleLabel = L"启用";
+    if (IsMouseHookActive()) {
+        toggleFlags |= MF_CHECKED;
+        toggleLabel = L"暂停";
+    } else if (settings_.enabled &&
+               hookRuntimeState_ == HookRuntimeState::Starting) {
+        toggleFlags |= MF_GRAYED;
+        toggleLabel = L"正在启用…";
+    } else if (settings_.enabled) {
+        toggleLabel = L"重试启用";
+    }
+    AppendMenuW(menu, toggleFlags, kMenuToggleEnabled, toggleLabel);
     AppendMenuW(menu, MF_STRING, kMenuSettings, L"设置…");
     bool startupEnabled = false;
     std::wstring ignoredError;
@@ -1177,9 +1587,9 @@ void SuperDragApp::CreateSettingsControls() {
            SS_LEFT, kControlHelp);
     create(0, L"STATIC", L"", SS_LEFT, kControlStatus);
     create(0, L"BUTTON", L"保存(&S)",
-           BS_OWNERDRAW | BS_DEFPUSHBUTTON | WS_TABSTOP, kControlSave);
+           BS_OWNERDRAW | WS_TABSTOP, kControlSave);
     create(0, L"BUTTON", L"取消(&X)",
-           BS_OWNERDRAW | BS_PUSHBUTTON | WS_TABSTOP, kControlCancel);
+           BS_OWNERDRAW | WS_TABSTOP, kControlCancel);
 }
 
 void SuperDragApp::LayoutSettingsControls(UINT dpi) {
@@ -1189,8 +1599,8 @@ void SuperDragApp::LayoutSettingsControls(UINT dpi) {
 
     RECT clientRect{};
     GetClientRect(settingsWindow_, &clientRect);
-    const int client_width = clientRect.right;
-    const int client_height = clientRect.bottom;
+    const int client_width = static_cast<int>(clientRect.right);
+    const int client_height = static_cast<int>(clientRect.bottom);
 
     HFONT previous_font = settingsFont_;
     settingsFont_ = nullptr;
@@ -1198,40 +1608,68 @@ void SuperDragApp::LayoutSettingsControls(UINT dpi) {
 
     using Layout = ui::SettingsLayout;
 
-    HDWP dwp = BeginDeferWindowPos(11);
-    auto move = [&](int id, const RECT& rc) {
-        HWND control = GetDlgItem(settingsWindow_, id);
-        DeferWindowPos(dwp, control, nullptr, rc.left, rc.top,
-                       rc.right - rc.left, rc.bottom - rc.top,
-                       SWP_NOZORDER | SWP_NOACTIVATE);
-        SendMessageW(control, WM_SETFONT,
-                     reinterpret_cast<WPARAM>(settingsFont_), TRUE);
-    };
-
-    move(kControlEnabled, Layout::EnabledCheckbox(dpi));
     const RECT group_rc = Layout::ModifierGroup(dpi, client_width);
-    move(kControlModifierGroup, group_rc);
-    move(kControlWin,
-         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 0));
-    move(kControlControl,
-         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 1));
-    move(kControlAlt,
-         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 2));
-    move(kControlShift,
-         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 3));
     const RECT startup_rc = Layout::StartupCheckbox(dpi, group_rc.bottom);
-    move(kControlStartup, startup_rc);
     const RECT help_rc =
         Layout::HelpLabel(dpi, client_width, startup_rc.bottom);
-    move(kControlHelp, help_rc);
-    move(kControlStatus,
-         Layout::StatusLabel(dpi, client_width, help_rc.bottom));
-    move(kControlSave,
-         Layout::SaveButton(dpi, client_width, client_height));
-    move(kControlCancel,
-         Layout::CancelButton(dpi, client_width, client_height));
+    struct ControlPlacement {
+        int id;
+        RECT rect;
+    };
+    const std::array<ControlPlacement, 11> placements{{
+        {kControlEnabled, Layout::EnabledCheckbox(dpi)},
+        {kControlModifierGroup, group_rc},
+        {kControlWin,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 0)},
+        {kControlControl,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 1)},
+        {kControlAlt,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 2)},
+        {kControlShift,
+         Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 3)},
+        {kControlStartup, startup_rc},
+        {kControlHelp, help_rc},
+        {kControlStatus,
+         Layout::StatusLabel(dpi, client_width, help_rc.bottom)},
+        {kControlSave,
+         Layout::SaveButton(dpi, client_width, client_height)},
+        {kControlCancel,
+         Layout::CancelButton(dpi, client_width, client_height)},
+    }};
 
-    EndDeferWindowPos(dwp);
+    HDWP dwp = BeginDeferWindowPos(static_cast<int>(placements.size()));
+    for (const ControlPlacement& placement : placements) {
+        if (dwp == nullptr) {
+            break;
+        }
+        const HWND control = GetDlgItem(settingsWindow_, placement.id);
+        if (control == nullptr) {
+            continue;
+        }
+        const RECT& rc = placement.rect;
+        dwp = DeferWindowPos(dwp, control, nullptr, rc.left, rc.top,
+                             rc.right - rc.left, rc.bottom - rc.top,
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    bool layoutApplied = false;
+    if (dwp != nullptr) {
+        layoutApplied = EndDeferWindowPos(dwp) != FALSE;
+    }
+
+    for (const ControlPlacement& placement : placements) {
+        const HWND control = GetDlgItem(settingsWindow_, placement.id);
+        if (control == nullptr) {
+            continue;
+        }
+        if (!layoutApplied) {
+            const RECT& rc = placement.rect;
+            SetWindowPos(control, nullptr, rc.left, rc.top, rc.right - rc.left,
+                         rc.bottom - rc.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        SendMessageW(control, WM_SETFONT,
+                     reinterpret_cast<WPARAM>(settingsFont_), TRUE);
+    }
 
     if (previous_font != nullptr) {
         DeleteObject(previous_font);
@@ -1262,11 +1700,13 @@ void SuperDragApp::LoadSettingsIntoControls() {
         SetSettingsStatus(error, true);
     } else {
         SetSettingsStatus(L"", false);
+        UpdateHookStatusInSettings();
     }
     SetCheckbox(settingsWindow_, kControlStartup, startupEnabled);
 }
 
 void SuperDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
+    hookStatusVisible_ = false;
     settingsStatusError_ = is_error;
     if (settingsWindow_ != nullptr) {
         SetDlgItemTextW(settingsWindow_, kControlStatus, text.c_str());
@@ -1274,6 +1714,39 @@ void SuperDragApp::SetSettingsStatus(const std::wstring& text, bool is_error) {
         if (status != nullptr) {
             InvalidateRect(status, nullptr, TRUE);
         }
+    }
+}
+
+void SuperDragApp::SetHookStatus(const std::wstring& text, bool isError) {
+    SetSettingsStatus(text, isError);
+    hookStatusVisible_ = true;
+}
+
+void SuperDragApp::UpdateHookStatusInSettings() {
+    if (settingsWindow_ == nullptr) {
+        return;
+    }
+    switch (hookRuntimeState_) {
+        case HookRuntimeState::Starting:
+            if (lastHookErrorText_.empty()) {
+                SetHookStatus(L"正在启用窗口拖动…", false);
+            } else {
+                SetHookStatus(L"正在重试启用窗口拖动；上次失败：" +
+                                  lastHookErrorText_,
+                              true);
+            }
+            break;
+        case HookRuntimeState::Failed:
+            SetHookStatus(lastHookErrorText_ +
+                              L"。请从托盘菜单重试启用。",
+                          true);
+            break;
+        case HookRuntimeState::Active:
+        case HookRuntimeState::Stopped:
+            if (hookStatusVisible_) {
+                SetSettingsStatus(L"", false);
+            }
+            break;
     }
 }
 
@@ -1318,39 +1791,42 @@ bool SuperDragApp::CommitSettings(const UserSettings& requested,
         return false;
     }
 
-    const bool hookWasInstalled = mouseHook_ != nullptr;
-    if (requested.enabled && !hookWasInstalled &&
-        !InstallMouseHook(error)) {
-        return false;
-    }
-
     const UserSettings previous = settings_;
     if (!SaveSettings(requested, error)) {
-        if (!hookWasInstalled) {
-            RemoveMouseHook();
-        }
         return false;
     }
 
     if (startupEnabled != oldStartupEnabled &&
         !SetStartupEnabled(startupEnabled, error)) {
-        std::wstring ignoredError;
-        SaveSettings(previous, &ignoredError);
-        if (!hookWasInstalled) {
-            RemoveMouseHook();
+        std::wstring rollbackError;
+        if (!SaveSettings(previous, &rollbackError) && error != nullptr) {
+            error->append(L"；恢复原设置失败：");
+            error->append(rollbackError);
         }
         return false;
     }
 
     settings_ = requested;
     if (!settings_.enabled) {
-        EndDrag();
+        CancelMouseHookRetry();
+        EndDrag(L"disabled");
         RemoveMouseHook();
+        hookRuntimeState_ = HookRuntimeState::Stopped;
+        lastHookError_ = ERROR_SUCCESS;
+        lastHookErrorText_.clear();
+        UpdateHookStatusInSettings();
+    } else if (!IsMouseHookActive()) {
+        RequestMouseHookInstall(true);
     }
     return true;
 }
 
 void SuperDragApp::ToggleEnabledFromTray() {
+    if (settings_.enabled && !IsMouseHookActive()) {
+        RequestMouseHookInstall(true);
+        return;
+    }
+
     bool startupEnabled = false;
     std::wstring error;
     if (!QueryStartupEnabled(&startupEnabled, nullptr, &error)) {

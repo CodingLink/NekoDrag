@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <array>
 #include <cwchar>
 #include <string>
 #include <vector>
@@ -69,6 +70,40 @@ bool WriteDword(HKEY key, const wchar_t* name, DWORD value,
         return false;
     }
     return true;
+}
+
+struct DwordSnapshot {
+    bool exists = false;
+    DWORD value = 0;
+};
+
+bool SnapshotDword(HKEY key, const wchar_t* name, DwordSnapshot* snapshot,
+                   std::wstring* error) {
+    DWORD size = sizeof(snapshot->value);
+    const LSTATUS status = RegGetValueW(
+        key, nullptr, name, RRF_RT_REG_DWORD, nullptr, &snapshot->value, &size);
+    if (status == ERROR_FILE_NOT_FOUND) {
+        *snapshot = DwordSnapshot{};
+        return true;
+    }
+    if (status != ERROR_SUCCESS) {
+        SetError(error, L"读取原设置失败", status);
+        return false;
+    }
+    snapshot->exists = true;
+    return true;
+}
+
+bool RestoreDword(HKEY key, const wchar_t* name,
+                  const DwordSnapshot& snapshot) {
+    if (snapshot.exists) {
+        return RegSetValueExW(
+                   key, name, 0, REG_DWORD,
+                   reinterpret_cast<const BYTE*>(&snapshot.value),
+                   static_cast<DWORD>(sizeof(snapshot.value))) == ERROR_SUCCESS;
+    }
+    const LSTATUS status = RegDeleteValueW(key, name);
+    return status == ERROR_SUCCESS || status == ERROR_FILE_NOT_FOUND;
 }
 
 bool CurrentExecutablePath(std::wstring* path, std::wstring* error) {
@@ -164,21 +199,53 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
     DWORD disposition = 0;
     const LSTATUS createStatus = RegCreateKeyExW(
         HKEY_CURRENT_USER, kSettingsKey, 0, nullptr,
-        REG_OPTION_NON_VOLATILE, KEY_SET_VALUE, nullptr, key.receive(),
+        REG_OPTION_NON_VOLATILE, KEY_QUERY_VALUE | KEY_SET_VALUE, nullptr,
+        key.receive(),
         &disposition);
     if (createStatus != ERROR_SUCCESS) {
         SetError(error, L"创建设置失败", createStatus);
         return false;
     }
 
-    return WriteDword(key.get(), L"Enabled", settings.enabled ? 1U : 0U,
-                      error) &&
-           WriteDword(key.get(), L"ModifierMask", settings.modifierMask,
-                      error) &&
-           WriteDword(key.get(), L"FirstRunCompleted",
-                      settings.firstRunCompleted ? 1U : 0U, error) &&
-           WriteDword(key.get(), L"PrivilegeHintShown",
-                      settings.privilegeHintShown ? 1U : 0U, error);
+    struct PendingDword {
+        const wchar_t* name;
+        DWORD value;
+        DwordSnapshot previous;
+    };
+    std::array<PendingDword, 4> values{{
+        {L"Enabled", settings.enabled ? 1U : 0U, {}},
+        {L"ModifierMask", settings.modifierMask, {}},
+        {L"FirstRunCompleted", settings.firstRunCompleted ? 1U : 0U, {}},
+        {L"PrivilegeHintShown", settings.privilegeHintShown ? 1U : 0U, {}},
+    }};
+
+    for (PendingDword& value : values) {
+        if (!SnapshotDword(key.get(), value.name, &value.previous, error)) {
+            return false;
+        }
+    }
+
+    std::size_t writtenCount = 0;
+    for (; writtenCount < values.size(); ++writtenCount) {
+        const PendingDword& value = values[writtenCount];
+        if (WriteDword(key.get(), value.name, value.value, error)) {
+            continue;
+        }
+
+        bool rollbackSucceeded = true;
+        while (writtenCount > 0) {
+            --writtenCount;
+            const PendingDword& written = values[writtenCount];
+            rollbackSucceeded =
+                RestoreDword(key.get(), written.name, written.previous) &&
+                rollbackSucceeded;
+        }
+        if (!rollbackSucceeded && error != nullptr) {
+            error->append(L"；恢复原设置时也发生错误");
+        }
+        return false;
+    }
+    return true;
 }
 
 bool QueryStartupEnabled(bool* enabled, std::wstring* command,

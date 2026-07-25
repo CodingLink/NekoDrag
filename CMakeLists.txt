@@ -28,6 +28,25 @@ if(WIN32)
         OFF
     )
 
+    add_library(superdrag_window_move STATIC
+        src/window_move_worker.cpp
+    )
+    target_include_directories(superdrag_window_move PUBLIC src)
+    target_compile_definitions(superdrag_window_move PRIVATE
+        UNICODE
+        _UNICODE
+        WIN32_LEAN_AND_MEAN
+        NOMINMAX
+        _WIN32_WINNT=0x0A00
+    )
+    target_compile_options(superdrag_window_move PRIVATE
+        /W4 /permissive- /utf-8 /EHsc
+    )
+    target_link_libraries(superdrag_window_move PUBLIC user32)
+    set_property(TARGET superdrag_window_move PROPERTY
+        MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+    )
+
     add_executable(SuperDrag WIN32
         src/main.cpp
         src/app.cpp
@@ -50,6 +69,7 @@ if(WIN32)
     target_compile_options(SuperDrag PRIVATE /W4 /permissive- /utf-8 /EHsc)
     target_link_libraries(SuperDrag PRIVATE
         superdrag_core
+        superdrag_window_move
         user32
         shell32
         advapi32
@@ -78,4 +98,28 @@ if(BUILD_TESTING)
         target_compile_options(superdrag_tests PRIVATE -Wall -Wextra -Wpedantic)
     endif()
     add_test(NAME superdrag_core_tests COMMAND superdrag_tests)
+
+    if(WIN32)
+        add_executable(superdrag_window_move_tests
+            tests/window_move_worker_tests.cpp
+        )
+        target_link_libraries(superdrag_window_move_tests PRIVATE
+            superdrag_window_move
+        )
+        target_compile_definitions(superdrag_window_move_tests PRIVATE
+            UNICODE
+            _UNICODE
+            WIN32_LEAN_AND_MEAN
+            NOMINMAX
+            _WIN32_WINNT=0x0A00
+        )
+        target_compile_options(superdrag_window_move_tests PRIVATE
+            /W4 /permissive- /utf-8 /EHsc
+        )
+        set_property(TARGET superdrag_window_move_tests PROPERTY
+            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+        )
+        add_test(NAME superdrag_window_move_tests
+                 COMMAND superdrag_window_move_tests)
+    endif()
 endif()
