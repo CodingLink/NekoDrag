@@ -1749,6 +1749,7 @@ void SuperDragApp::EndDrag(const wchar_t* reason, bool trace) {
 }
 
 void SuperDragApp::FailCurrentDrag(bool showPrivilegeHint, DWORD error) {
+    static_cast<void>(error);
     SD_TRACE(L"drag failed, hint=%d error=%lu",
              showPrivilegeHint ? 1 : 0,
              static_cast<unsigned long>(error));

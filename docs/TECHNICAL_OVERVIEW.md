@@ -119,6 +119,8 @@ WH_MOUSE_LL
 - `IsExactModifierMatch()` 要求没有额外修饰键。
 - `NativeMoveWorker` 同步调用 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`；调用会
   阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
+- 低级钩子回调早于 Windows 更新异步按键状态；工作线程在发送原生
+  消息前最多等待 50ms，避免将真实按下误判为“已释放”。
 - 原生循环开始后 SuperDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
   跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
 - 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。

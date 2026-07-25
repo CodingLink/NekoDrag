@@ -7,6 +7,27 @@
 #include <utility>
 
 namespace superdrag {
+namespace {
+
+constexpr auto kButtonStatePropagationTimeout =
+    std::chrono::milliseconds(50);
+constexpr auto kButtonStatePollInterval = std::chrono::milliseconds(1);
+
+bool IsButtonDown(int virtualKey) noexcept {
+    return (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+}
+
+bool WaitForButtonDown(int virtualKey) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          kButtonStatePropagationTimeout;
+    while (!IsButtonDown(virtualKey) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(kButtonStatePollInterval);
+    }
+    return IsButtonDown(virtualKey);
+}
+
+}  // namespace
 
 struct NativeMoveWorker::State {
     std::mutex mutex;
@@ -170,7 +191,11 @@ NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
         result.error = ERROR_TIMEOUT;
         return result;
     }
-    if ((GetAsyncKeyState(request.logicalButtonVirtualKey) & 0x8000) == 0) {
+    // WH_MOUSE_LL runs before Windows publishes the new asynchronous button
+    // state. The worker can therefore beat that update even though the hook
+    // has already accepted a real button-down event. Wait briefly off the
+    // hook/UI thread instead of misclassifying the gesture as released.
+    if (!WaitForButtonDown(request.logicalButtonVirtualKey)) {
         result.error = ERROR_CANCELLED;
         return result;
     }
@@ -188,7 +213,7 @@ NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
 
     result.dispatched = true;
     result.buttonDownAfterCall =
-        (GetAsyncKeyState(request.logicalButtonVirtualKey) & 0x8000) != 0;
+        IsButtonDown(request.logicalButtonVirtualKey);
     return result;
 }
 
