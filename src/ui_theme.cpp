@@ -375,6 +375,97 @@ void DrawThemedCheckbox(const DRAWITEMSTRUCT* dis, const UiTheme& theme,
     }
 }
 
+void DrawThemedRadioButton(const DRAWITEMSTRUCT* dis, const UiTheme& theme,
+                           bool onSurface) {
+    HWND hwnd = dis->hwndItem;
+    HDC hdc = dis->hDC;
+    RECT rc = dis->rcItem;
+    const bool checked = (dis->itemState & ODS_CHECKED) != 0;
+    const bool is_disabled = (dis->itemState & ODS_DISABLED) != 0;
+    const UINT dpi = GetDpiForWindow(hwnd);
+    const HBRUSH background_brush =
+        onSurface ? theme.SurfaceBrush() : theme.BackgroundBrush();
+    const COLORREF background_color =
+        onSurface ? theme.SurfaceColor() : theme.BackgroundColor();
+
+    FillRect(hdc, &rc, background_brush);
+
+    wchar_t text[256]{};
+    const int text_len = GetWindowTextW(hwnd, text, 256);
+    const int button_size = ScaleDpi(14, dpi);
+    RECT button_rc{};
+    button_rc.left = rc.left;
+    button_rc.top = rc.top + (rc.bottom - rc.top - button_size) / 2;
+    button_rc.right = button_rc.left + button_size;
+    button_rc.bottom = button_rc.top + button_size;
+
+    if (theme.IsHighContrast()) {
+        UINT dfcs = DFCS_BUTTONRADIO;
+        if (checked) {
+            dfcs |= DFCS_CHECKED;
+        }
+        if (is_disabled) {
+            dfcs |= DFCS_INACTIVE;
+        }
+        DrawFrameControl(hdc, &button_rc, DFC_BUTTON, dfcs);
+    } else {
+        const COLORREF ring_color =
+            checked ? theme.AccentColor()
+                    : (is_disabled ? theme.SecondaryTextColor()
+                                   : theme.BorderColor());
+        HBRUSH ring_brush = CreateSolidBrush(background_color);
+        HPEN ring_pen = CreatePen(PS_SOLID, 1, ring_color);
+        HBRUSH old_brush =
+            static_cast<HBRUSH>(SelectObject(hdc, ring_brush));
+        HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, ring_pen));
+        Ellipse(hdc, button_rc.left, button_rc.top, button_rc.right,
+                button_rc.bottom);
+        SelectObject(hdc, old_brush);
+        SelectObject(hdc, old_pen);
+        DeleteObject(ring_brush);
+        DeleteObject(ring_pen);
+
+        if (checked) {
+            RECT dot_rc = button_rc;
+            InflateRect(&dot_rc, -ScaleDpi(4, dpi), -ScaleDpi(4, dpi));
+            HBRUSH dot_brush = CreateSolidBrush(theme.AccentColor());
+            HPEN dot_pen = CreatePen(PS_SOLID, 1, theme.AccentColor());
+            old_brush = static_cast<HBRUSH>(SelectObject(hdc, dot_brush));
+            old_pen = static_cast<HPEN>(SelectObject(hdc, dot_pen));
+            Ellipse(hdc, dot_rc.left, dot_rc.top, dot_rc.right,
+                    dot_rc.bottom);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            DeleteObject(dot_brush);
+            DeleteObject(dot_pen);
+        }
+    }
+
+    HFONT font =
+        reinterpret_cast<HFONT>(SendMessageW(hwnd, WM_GETFONT, 0, 0));
+    HFONT old_font =
+        font != nullptr ? static_cast<HFONT>(SelectObject(hdc, font)) : nullptr;
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, theme.IsHighContrast()
+                          ? GetSysColor(is_disabled ? COLOR_GRAYTEXT
+                                                   : COLOR_WINDOWTEXT)
+                          : (is_disabled ? theme.SecondaryTextColor()
+                                         : theme.TextColor()));
+    RECT text_rc = rc;
+    text_rc.left = button_rc.right + ScaleDpi(6, dpi);
+    DrawTextW(hdc, text, text_len, &text_rc,
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    if (old_font != nullptr) {
+        SelectObject(hdc, old_font);
+    }
+
+    if (dis->itemState & ODS_FOCUS) {
+        RECT focus_rc = rc;
+        InflateRect(&focus_rc, -ScaleDpi(2, dpi), -ScaleDpi(2, dpi));
+        DrawFocusRect(hdc, &focus_rc);
+    }
+}
+
 void DrawThemedGroupBox(const DRAWITEMSTRUCT* dis, const UiTheme& theme) {
     HWND hwnd = dis->hwndItem;
     HDC hdc = dis->hDC;

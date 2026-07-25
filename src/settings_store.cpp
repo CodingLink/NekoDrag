@@ -168,10 +168,12 @@ bool LoadSettings(UserSettings* settings, bool* settingsKeyExists,
 
     DWORD enabled = settings->enabled ? 1U : 0U;
     DWORD modifierMask = settings->modifierMask;
+    DWORD dragMode = static_cast<DWORD>(settings->dragEngineMode);
     DWORD firstRunCompleted = settings->firstRunCompleted ? 1U : 0U;
     DWORD privilegeHintShown = settings->privilegeHintShown ? 1U : 0U;
     if (!ReadDword(key.get(), L"Enabled", &enabled, error) ||
         !ReadDword(key.get(), L"ModifierMask", &modifierMask, error) ||
+        !ReadDword(key.get(), L"DragMode", &dragMode, error) ||
         !ReadDword(key.get(), L"FirstRunCompleted", &firstRunCompleted,
                    error) ||
         !ReadDword(key.get(), L"PrivilegeHintShown", &privilegeHintShown,
@@ -182,6 +184,7 @@ bool LoadSettings(UserSettings* settings, bool* settingsKeyExists,
     settings->enabled = enabled != 0;
     settings->modifierMask =
         IsValidModifierMask(modifierMask) ? modifierMask : kDefaultModifiers;
+    settings->dragEngineMode = NormalizeDragEngineMode(dragMode);
     settings->firstRunCompleted = firstRunCompleted != 0;
     settings->privilegeHintShown = privilegeHintShown != 0;
     return true;
@@ -191,6 +194,13 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
     if (!IsValidModifierMask(settings.modifierMask)) {
         if (error != nullptr) {
             *error = L"快捷键必须包含 1 至 3 个修饰键";
+        }
+        return false;
+    }
+    const DWORD dragMode = static_cast<DWORD>(settings.dragEngineMode);
+    if (!IsValidDragEngineMode(dragMode)) {
+        if (error != nullptr) {
+            *error = L"拖动模式无效";
         }
         return false;
     }
@@ -212,9 +222,10 @@ bool SaveSettings(const UserSettings& settings, std::wstring* error) {
         DWORD value;
         DwordSnapshot previous;
     };
-    std::array<PendingDword, 4> values{{
+    std::array<PendingDword, 5> values{{
         {L"Enabled", settings.enabled ? 1U : 0U, {}},
         {L"ModifierMask", settings.modifierMask, {}},
+        {L"DragMode", dragMode, {}},
         {L"FirstRunCompleted", settings.firstRunCompleted ? 1U : 0U, {}},
         {L"PrivilegeHintShown", settings.privilegeHintShown ? 1U : 0U, {}},
     }};

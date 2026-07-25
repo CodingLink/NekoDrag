@@ -20,6 +20,8 @@ void TestModifierValidation() {
     Expect(defaults.enabled, "dragging is enabled by default");
     Expect(defaults.modifierMask == (kModifierWin | kModifierAlt),
            "default shortcut is Win+Alt");
+    Expect(defaults.dragEngineMode == DragEngineMode::Automatic,
+           "automatic drag routing is the default");
     Expect(!defaults.firstRunCompleted,
            "a new profile has not completed first-run setup");
     Expect(IsValidModifierMask(kModifierWin), "one modifier is valid");
@@ -38,6 +40,53 @@ void TestModifierValidation() {
     Expect(!IsExactModifierMatch(kDefaultModifiers,
                                  kDefaultModifiers | kModifierShift),
            "additional modifiers prevent activation");
+}
+
+void TestDragEngineRouting() {
+    using namespace superdrag;
+
+    Expect(IsValidDragEngineMode(0), "automatic drag mode is valid");
+    Expect(IsValidDragEngineMode(1), "native-only drag mode is valid");
+    Expect(IsValidDragEngineMode(2),
+           "compatibility-only drag mode is valid");
+    Expect(!IsValidDragEngineMode(3), "unknown drag mode is invalid");
+    Expect(NormalizeDragEngineMode(0) == DragEngineMode::Automatic,
+           "automatic registry value is preserved");
+    Expect(NormalizeDragEngineMode(1) == DragEngineMode::NativeOnly,
+           "native-only registry value is preserved");
+    Expect(NormalizeDragEngineMode(2) ==
+               DragEngineMode::CompatibilityOnly,
+           "compatibility registry value is preserved");
+    Expect(NormalizeDragEngineMode(99) == DragEngineMode::Automatic,
+           "invalid registry values fall back to automatic mode");
+
+    Expect(SelectDragStartAction(DragEngineMode::Automatic, true) ==
+               DragStartAction::Native,
+           "automatic mode prefers the native engine");
+    Expect(SelectDragStartAction(DragEngineMode::Automatic, false) ==
+               DragStartAction::Compatibility,
+           "automatic mode uses compatibility when native is unavailable");
+    Expect(SelectDragStartAction(DragEngineMode::NativeOnly, true) ==
+               DragStartAction::Native,
+           "native-only mode starts native when available");
+    Expect(SelectDragStartAction(DragEngineMode::NativeOnly, false) ==
+               DragStartAction::Reject,
+           "native-only mode rejects unavailable native infrastructure");
+    Expect(SelectDragStartAction(DragEngineMode::CompatibilityOnly, true) ==
+               DragStartAction::Compatibility,
+           "compatibility-only mode bypasses available native support");
+    Expect(SelectDragStartAction(DragEngineMode::CompatibilityOnly, false) ==
+               DragStartAction::Compatibility,
+           "compatibility-only mode does not depend on native support");
+    Expect(SelectDragStartAction(static_cast<DragEngineMode>(99), true) ==
+               DragStartAction::Reject,
+           "invalid in-memory modes fail closed");
+    Expect(AllowsCompatibilityFallback(DragEngineMode::Automatic),
+           "automatic mode permits compatibility fallback");
+    Expect(!AllowsCompatibilityFallback(DragEngineMode::NativeOnly),
+           "native-only mode forbids compatibility fallback");
+    Expect(!AllowsCompatibilityFallback(DragEngineMode::CompatibilityOnly),
+           "compatibility-only mode never starts a native attempt");
 }
 
 void TestPositionCalculations() {
@@ -115,6 +164,7 @@ void TestNativeMoveCompletionDecision() {
 
 int main() {
     TestModifierValidation();
+    TestDragEngineRouting();
     TestPositionCalculations();
     TestWindowFiltering();
     TestNativeMoveCompletionDecision();

@@ -1,3 +1,4 @@
+#include "layout.h"
 #include "window_move_worker.h"
 
 #include <windows.h>
@@ -28,6 +29,46 @@ void Expect(bool condition, const char* description) {
 
 bool SamePoint(superdrag::Point left, superdrag::Point right) {
     return left.x == right.x && left.y == right.y;
+}
+
+void TestSettingsLayoutIncludesDragModeGroup() {
+    using superdrag::ui::SettingsLayout;
+
+    constexpr UINT testDpis[] = {96U, 144U, 192U};
+    for (const UINT dpi : testDpis) {
+        const int clientWidth =
+            SettingsLayout::Scale(SettingsLayout::kMinClientWidth, dpi);
+        const int clientHeight =
+            SettingsLayout::Scale(SettingsLayout::kMinClientHeight, dpi);
+        const RECT modifier =
+            SettingsLayout::ModifierGroup(dpi, clientWidth);
+        const RECT dragMode =
+            SettingsLayout::DragModeGroup(dpi, clientWidth, modifier.bottom);
+        const RECT startup =
+            SettingsLayout::StartupCheckbox(dpi, dragMode.bottom);
+        const RECT help =
+            SettingsLayout::HelpLabel(dpi, clientWidth, startup.bottom);
+        const RECT status =
+            SettingsLayout::StatusLabel(dpi, clientWidth, help.bottom);
+        const RECT save =
+            SettingsLayout::SaveButton(dpi, clientWidth, clientHeight);
+
+        Expect(modifier.bottom < dragMode.top,
+               "drag mode group follows modifier group");
+        Expect(dragMode.bottom < startup.top,
+               "startup checkbox follows drag mode group");
+        Expect(status.bottom <= save.top,
+               "status label does not overlap action buttons");
+        for (int index = 0; index < 3; ++index) {
+            const RECT option = SettingsLayout::DragModeOption(
+                dpi, dragMode.left, dragMode.top, index);
+            Expect(option.left >= dragMode.left &&
+                       option.right <= dragMode.right &&
+                       option.top >= dragMode.top &&
+                       option.bottom <= dragMode.bottom,
+                   "drag mode option remains inside its group");
+        }
+    }
 }
 
 bool WaitForRequestedOrigin(superdrag::WindowMoveWorker* worker,
@@ -362,6 +403,7 @@ void TestStopAcceptingRejectsNewMoves() {
 }  // namespace
 
 int main() {
+    TestSettingsLayoutIncludesDragModeGroup();
     TestLatestRequestWinsAndMovesAreSerialized();
     TestNewGenerationSupersedesPendingOldDrag();
     TestFailureResultIsPreserved();

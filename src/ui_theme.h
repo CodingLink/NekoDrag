@@ -48,6 +48,8 @@ class UiTheme {
 void DrawThemedPushButton(const DRAWITEMSTRUCT* dis, const UiTheme& theme);
 void DrawThemedCheckbox(const DRAWITEMSTRUCT* dis, const UiTheme& theme,
                         bool onSurface);
+void DrawThemedRadioButton(const DRAWITEMSTRUCT* dis, const UiTheme& theme,
+                           bool onSurface);
 void DrawThemedGroupBox(const DRAWITEMSTRUCT* dis, const UiTheme& theme);
 
 }  // namespace superdrag::ui

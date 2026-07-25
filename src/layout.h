@@ -12,7 +12,7 @@ struct SettingsLayout {
     static constexpr int kBaseDpi = 96;
 
     static constexpr int kMinClientWidth = 480;
-    static constexpr int kMinClientHeight = 400;
+    static constexpr int kMinClientHeight = 500;
 
     static constexpr int kMargin = 24;
     static constexpr int kTopMargin = 20;
@@ -27,6 +27,12 @@ struct SettingsLayout {
     static constexpr int kGroupInsetX = 16;
     static constexpr std::array<int, 4> kModifierCheckboxX = {16, 102, 188,
                                                                  274};
+
+    static constexpr int kDragModeGroupHeight = 88;
+    static constexpr int kDragModeOptionTop = 34;
+    static constexpr std::array<int, 3> kDragModeOptionX = {16, 150, 284};
+    static constexpr std::array<int, 3> kDragModeOptionWidth = {120, 120,
+                                                                132};
 
     static constexpr int kHelpHeight = 38;
     static constexpr int kStatusHeight = 32;
@@ -62,6 +68,24 @@ struct SettingsLayout {
         const int x = group_left + Scale(kModifierCheckboxX[index], dpi);
         const int y = group_top + Scale(kGroupCheckboxTop, dpi);
         const int w = Scale(kCheckboxWidth, dpi);
+        const int h = Scale(kCheckboxHeight, dpi);
+        return {x, y, x + w, y + h};
+    }
+
+    static RECT DragModeGroup(UINT dpi, int client_width,
+                              int previous_bottom) {
+        const int x = Scale(kMargin, dpi);
+        const int y = previous_bottom + Scale(kSectionSpacing, dpi);
+        const int w = client_width - 2 * Scale(kMargin, dpi);
+        const int h = Scale(kDragModeGroupHeight, dpi);
+        return {x, y, x + w, y + h};
+    }
+
+    static RECT DragModeOption(UINT dpi, int group_left, int group_top,
+                               int index) {
+        const int x = group_left + Scale(kDragModeOptionX[index], dpi);
+        const int y = group_top + Scale(kDragModeOptionTop, dpi);
+        const int w = Scale(kDragModeOptionWidth[index], dpi);
         const int h = Scale(kCheckboxHeight, dpi);
         return {x, y, x + w, y + h};
     }

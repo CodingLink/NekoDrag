@@ -13,9 +13,23 @@ constexpr std::uint32_t kAllModifiers =
     kModifierAlt | kModifierControl | kModifierShift | kModifierWin;
 constexpr std::uint32_t kDefaultModifiers = kModifierWin | kModifierAlt;
 
+// Persisted as the DragMode DWORD under HKCU\Software\SuperDrag.
+enum class DragEngineMode : std::uint32_t {
+    Automatic = 0,
+    NativeOnly = 1,
+    CompatibilityOnly = 2,
+};
+
+enum class DragStartAction {
+    Native,
+    Compatibility,
+    Reject,
+};
+
 struct UserSettings {
     bool enabled = true;
     std::uint32_t modifierMask = kDefaultModifiers;
+    DragEngineMode dragEngineMode = DragEngineMode::Automatic;
     bool firstRunCompleted = false;
     bool privilegeHintShown = false;
 };
@@ -56,6 +70,11 @@ enum class NativeMoveCompletionAction {
 };
 
 bool IsValidModifierMask(std::uint32_t mask) noexcept;
+bool IsValidDragEngineMode(std::uint32_t value) noexcept;
+DragEngineMode NormalizeDragEngineMode(std::uint32_t value) noexcept;
+DragStartAction SelectDragStartAction(DragEngineMode mode,
+                                      bool nativeAvailable) noexcept;
+bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept;
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept;
 Point ComputeDraggedOrigin(Point cursor, Point grabOffset) noexcept;

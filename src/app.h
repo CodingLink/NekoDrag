@@ -61,6 +61,7 @@ class SuperDragApp {
         std::uint64_t manualCompletions = 0;
         std::uint64_t manualCoalescedRequests = 0;
         std::uint64_t manualMaxElapsedUs = 0;
+        DragEngineMode engineMode = DragEngineMode::Automatic;
         DragMode mode = DragMode::None;
         HWND target = nullptr;
         Point startCursor{};
@@ -124,6 +125,8 @@ class SuperDragApp {
     void NoteNativeButtonReleased();
     void HandleNativeButtonReleased(std::uint64_t generation, HWND target);
     void CompleteNativeDrag(const wchar_t* reason);
+    void FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
+                            bool nativeAttempted);
     void RestoreMouseHookAfterNativeDrag();
     bool SubmitLatestDragPosition(bool finalRequest);
     void HandleMoveCompleted();
@@ -178,6 +181,7 @@ class SuperDragApp {
     bool hookInstallMessagePending_ = false;
     bool hookStatusVisible_ = false;
     bool settingsStatusError_ = false;
+    bool nativeOnlyFailureNotified_ = false;
     DragState drag_{};
     std::uint64_t dragGenerationCounter_ = 0;
     bool trayIconAdded_ = false;

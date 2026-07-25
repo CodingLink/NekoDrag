@@ -44,6 +44,36 @@ bool IsValidModifierMask(std::uint32_t mask) noexcept {
     return count >= 1 && count <= 3;
 }
 
+bool IsValidDragEngineMode(std::uint32_t value) noexcept {
+    return value <=
+           static_cast<std::uint32_t>(DragEngineMode::CompatibilityOnly);
+}
+
+DragEngineMode NormalizeDragEngineMode(std::uint32_t value) noexcept {
+    return IsValidDragEngineMode(value)
+               ? static_cast<DragEngineMode>(value)
+               : DragEngineMode::Automatic;
+}
+
+DragStartAction SelectDragStartAction(DragEngineMode mode,
+                                      bool nativeAvailable) noexcept {
+    switch (mode) {
+        case DragEngineMode::Automatic:
+            return nativeAvailable ? DragStartAction::Native
+                                   : DragStartAction::Compatibility;
+        case DragEngineMode::NativeOnly:
+            return nativeAvailable ? DragStartAction::Native
+                                   : DragStartAction::Reject;
+        case DragEngineMode::CompatibilityOnly:
+            return DragStartAction::Compatibility;
+    }
+    return DragStartAction::Reject;
+}
+
+bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept {
+    return mode == DragEngineMode::Automatic;
+}
+
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept {
     return IsValidModifierMask(configured) && configured == currentlyDown;

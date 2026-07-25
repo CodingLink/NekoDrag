@@ -65,10 +65,31 @@ constexpr int kControlSave = 1008;
 constexpr int kControlCancel = 1009;
 constexpr int kControlModifierGroup = 1010;
 constexpr int kControlHelp = 1011;
+constexpr int kControlDragModeGroup = 1012;
+constexpr int kControlDragModeAutomatic = 1013;
+constexpr int kControlDragModeNative = 1014;
+constexpr int kControlDragModeCompatibility = 1015;
+constexpr std::array<int, 3> kDragModeControlIds{
+    kControlDragModeAutomatic,
+    kControlDragModeNative,
+    kControlDragModeCompatibility,
+};
 
 SuperDragApp* gApp = nullptr;
 
 #ifdef SUPERDRAG_TRACE
+const wchar_t* DragEngineModeTraceName(DragEngineMode mode) noexcept {
+    switch (mode) {
+        case DragEngineMode::Automatic:
+            return L"automatic";
+        case DragEngineMode::NativeOnly:
+            return L"native-only";
+        case DragEngineMode::CompatibilityOnly:
+            return L"compatibility-only";
+    }
+    return L"invalid";
+}
+
 void TraceDragState(const wchar_t* format, ...) {
     wchar_t message[256]{};
     va_list args;
@@ -182,6 +203,34 @@ bool IsCheckboxChecked(HWND parent, int controlId) {
     HWND control = GetDlgItem(parent, controlId);
     return control != nullptr &&
            GetWindowLongPtrW(control, GWLP_USERDATA) == BST_CHECKED;
+}
+
+int DragModeControlId(DragEngineMode mode) noexcept {
+    switch (mode) {
+        case DragEngineMode::Automatic:
+            return kControlDragModeAutomatic;
+        case DragEngineMode::NativeOnly:
+            return kControlDragModeNative;
+        case DragEngineMode::CompatibilityOnly:
+            return kControlDragModeCompatibility;
+    }
+    return kControlDragModeAutomatic;
+}
+
+void SetDragModeSelection(HWND parent, int selectedControlId) {
+    for (const int controlId : kDragModeControlIds) {
+        SetCheckbox(parent, controlId, controlId == selectedControlId);
+    }
+}
+
+DragEngineMode SelectedDragEngineMode(HWND parent) noexcept {
+    if (IsCheckboxChecked(parent, kControlDragModeNative)) {
+        return DragEngineMode::NativeOnly;
+    }
+    if (IsCheckboxChecked(parent, kControlDragModeCompatibility)) {
+        return DragEngineMode::CompatibilityOnly;
+    }
+    return DragEngineMode::Automatic;
 }
 
 }  // namespace
@@ -698,7 +747,12 @@ LRESULT SuperDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                              static_cast<unsigned long long>(
                                  drag_.generation));
                     AbandonAndRestartNativeMoveWorker();
-                    CompleteNativeDrag(L"native-move-timeout");
+                    if (drag_.engineMode == DragEngineMode::NativeOnly) {
+                        FailNativeOnlyDrag(L"native-only-move-timeout",
+                                           ERROR_TIMEOUT, true);
+                    } else {
+                        CompleteNativeDrag(L"native-move-timeout");
+                    }
                 }
                 return 0;
             }
@@ -741,6 +795,11 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
             }
             if (code == BN_CLICKED) {
                 switch (id) {
+                    case kControlDragModeAutomatic:
+                    case kControlDragModeNative:
+                    case kControlDragModeCompatibility:
+                        SetDragModeSelection(window, id);
+                        return 0;
                     case kControlEnabled:
                     case kControlWin:
                     case kControlControl:
@@ -828,7 +887,21 @@ LRESULT SuperDragApp::OnSettingsMessage(HWND window, UINT message,
                                            on_surface);
                     return TRUE;
                 }
+                case kControlDragModeAutomatic:
+                case kControlDragModeNative:
+                case kControlDragModeCompatibility: {
+                    DRAWITEMSTRUCT radio_state = *dis;
+                    if (IsCheckboxChecked(window,
+                                          static_cast<int>(dis->CtlID))) {
+                        radio_state.itemState |= ODS_CHECKED;
+                    } else {
+                        radio_state.itemState &= ~ODS_CHECKED;
+                    }
+                    ui::DrawThemedRadioButton(&radio_state, *theme_, true);
+                    return TRUE;
+                }
                 case kControlModifierGroup:
+                case kControlDragModeGroup:
                     ui::DrawThemedGroupBox(dis, *theme_);
                     return TRUE;
                 case kControlSave:
@@ -1122,6 +1195,7 @@ bool SuperDragApp::BeginDragFromHook(HWND target, Point cursor) {
     drag_ = DragState{};
     drag_.active = true;
     drag_.beginPending = true;
+    drag_.engineMode = settings_.dragEngineMode;
     drag_.generation = ++dragGenerationCounter_;
     if (drag_.generation == 0) {
         drag_.generation = ++dragGenerationCounter_;
@@ -1236,43 +1310,75 @@ void SuperDragApp::BeginDragOnMessageThread() {
     drag_.beginPending = false;
     SetForegroundWindow(drag_.target);
     SD_TRACE(L"begin drag generation=%llu target=%p cursor=(%ld,%ld) "
-             L"maximized=%d nativeAvailable=%d",
+             L"maximized=%d nativeAvailable=%d engine=%ls",
              static_cast<unsigned long long>(drag_.generation), drag_.target,
              static_cast<long>(drag_.startCursor.x),
              static_cast<long>(drag_.startCursor.y),
-             drag_.restoring ? 1 : 0, nativeMoveAvailable_ ? 1 : 0);
+             drag_.restoring ? 1 : 0, nativeMoveAvailable_ ? 1 : 0,
+             DragEngineModeTraceName(drag_.engineMode));
 
-    if (nativeMoveAvailable_ && nativeMoveWorker_ != nullptr) {
-        drag_.mode = DragMode::NativeStarting;
-        nativeEventGeneration_.store(drag_.generation,
-                                     std::memory_order_release);
-        const NativeMoveWorker::Request request{
-            drag_.generation, drag_.target, drag_.startCursor};
-        if (nativeMoveWorker_->Submit(request)) {
-            SD_TRACE(L"native move requested generation=%llu target=%p",
-                     static_cast<unsigned long long>(drag_.generation),
-                     drag_.target);
-            return;
+    const bool nativeReady =
+        nativeMoveAvailable_ && nativeMoveWorker_ != nullptr;
+    const DragStartAction startAction =
+        SelectDragStartAction(drag_.engineMode, nativeReady);
+    if (startAction == DragStartAction::Compatibility) {
+        if (drag_.engineMode == DragEngineMode::CompatibilityOnly) {
+            SD_TRACE(L"compatibility-direct generation=%llu",
+                     static_cast<unsigned long long>(drag_.generation));
+        } else {
+            SD_TRACE(L"automatic-fallback generation=%llu "
+                     L"reason=native-unavailable",
+                     static_cast<unsigned long long>(drag_.generation));
         }
-        AbandonAndRestartNativeMoveWorker();
-        if (nativeMoveAvailable_ && nativeMoveWorker_ != nullptr &&
-            nativeMoveWorker_->Submit(request)) {
-            SD_TRACE(L"native move worker replaced and request retried "
-                     L"generation=%llu target=%p",
-                     static_cast<unsigned long long>(drag_.generation),
-                     drag_.target);
-            return;
-        }
-        nativeEventGeneration_.store(0, std::memory_order_release);
-        SD_TRACE(L"native move worker busy, using manual fallback");
+        BeginManualFallback(false);
+        return;
+    }
+    if (startAction == DragStartAction::Reject) {
+        FailNativeOnlyDrag(L"native-only-infrastructure-unavailable",
+                           ERROR_NOT_READY, false);
+        return;
     }
 
-    BeginManualFallback(false);
+    drag_.mode = DragMode::NativeStarting;
+    nativeEventGeneration_.store(drag_.generation,
+                                 std::memory_order_release);
+    const NativeMoveWorker::Request request{
+        drag_.generation, drag_.target, drag_.startCursor};
+    if (nativeMoveWorker_->Submit(request)) {
+        SD_TRACE(L"native move requested generation=%llu target=%p",
+                 static_cast<unsigned long long>(drag_.generation),
+                 drag_.target);
+        return;
+    }
+    AbandonAndRestartNativeMoveWorker();
+    if (nativeMoveAvailable_ && nativeMoveWorker_ != nullptr &&
+        nativeMoveWorker_->Submit(request)) {
+        SD_TRACE(L"native move worker replaced and request retried "
+                 L"generation=%llu target=%p",
+                 static_cast<unsigned long long>(drag_.generation),
+                 drag_.target);
+        return;
+    }
+    nativeEventGeneration_.store(0, std::memory_order_release);
+    if (AllowsCompatibilityFallback(drag_.engineMode)) {
+        SD_TRACE(L"automatic-fallback generation=%llu "
+                 L"reason=native-worker-unavailable",
+                 static_cast<unsigned long long>(drag_.generation));
+        BeginManualFallback(false);
+    } else {
+        FailNativeOnlyDrag(L"native-only-worker-unavailable", ERROR_BUSY,
+                           false);
+    }
 }
 
 void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
     if (!drag_.active || !IsWindow(drag_.target)) {
         EndDrag(L"target-invalid-before-manual-fallback");
+        return;
+    }
+    if (drag_.engineMode == DragEngineMode::NativeOnly) {
+        FailNativeOnlyDrag(L"native-only-fallback-blocked",
+                           ERROR_NOT_SUPPORTED, nativeAttempted);
         return;
     }
     if (IsHungAppWindow(drag_.target)) {
@@ -1334,7 +1440,8 @@ void SuperDragApp::BeginManualFallback(bool nativeAttempted) {
         }
     }
     if (nativeAttempted) {
-        SD_TRACE(L"native move ignored; manual fallback generation=%llu "
+        SD_TRACE(L"automatic-fallback generation=%llu "
+                 L"reason=native-move-ignored "
                  L"targetMoved=%d",
                  static_cast<unsigned long long>(drag_.generation),
                  targetMoved ? 1 : 0);
@@ -1385,6 +1492,11 @@ void SuperDragApp::HandleNativeMoveCompleted() {
                  drag_.target);
     }
     if (!result.dispatched) {
+        if (drag_.engineMode == DragEngineMode::NativeOnly) {
+            FailNativeOnlyDrag(L"native-only-dispatch-failed",
+                               result.error, true);
+            return;
+        }
         if (result.error == ERROR_ACCESS_DENIED ||
             result.error == ERROR_PRIVILEGE_NOT_HELD) {
             ShowPrivilegeHintOnce();
@@ -1409,7 +1521,16 @@ void SuperDragApp::HandleNativeMoveCompleted() {
     }
     if (SetTimer(mainWindow_, kNativeFallbackTimer,
                  kNativeFallbackGraceMs, nullptr) == 0) {
-        BeginManualFallback(true);
+        DWORD error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            error = ERROR_GEN_FAILURE;
+        }
+        if (AllowsCompatibilityFallback(drag_.engineMode)) {
+            BeginManualFallback(true);
+        } else {
+            FailNativeOnlyDrag(L"native-only-fallback-timer-failed", error,
+                               true);
+        }
     }
 }
 
@@ -1444,7 +1565,12 @@ void SuperDragApp::HandleNativeFallbackTimeout() {
     const NativeMoveCompletionAction action = DecideNativeMoveCompletion(
         drag_.nativeMoveStarted, drag_.nativeButtonReleased, true);
     if (action == NativeMoveCompletionAction::UseManualFallback) {
-        BeginManualFallback(true);
+        if (AllowsCompatibilityFallback(drag_.engineMode)) {
+            BeginManualFallback(true);
+        } else {
+            FailNativeOnlyDrag(L"native-only-move-not-started",
+                               ERROR_NOT_SUPPORTED, true);
+        }
     } else {
         CompleteNativeDrag(L"native-move-complete-after-grace");
     }
@@ -1468,14 +1594,49 @@ void SuperDragApp::HandleNativeButtonReleased(
     }
     if (SetTimer(mainWindow_, kNativeCompletionTimer,
                  kNativeCompletionTimeoutMs, nullptr) == 0) {
+        DWORD error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            error = ERROR_GEN_FAILURE;
+        }
         AbandonAndRestartNativeMoveWorker();
-        CompleteNativeDrag(L"native-completion-timer-failed");
+        if (drag_.engineMode == DragEngineMode::NativeOnly) {
+            FailNativeOnlyDrag(L"native-only-completion-timer-failed",
+                               error, true);
+        } else {
+            CompleteNativeDrag(L"native-completion-timer-failed");
+        }
     }
 }
 
 void SuperDragApp::CompleteNativeDrag(const wchar_t* reason) {
     EndDrag(reason);
     RestoreMouseHookAfterNativeDrag();
+}
+
+void SuperDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
+                                      bool nativeAttempted) {
+    static_cast<void>(reason);
+    SD_TRACE(L"native-only-failed generation=%llu target=%p reason=%ls "
+             L"error=%lu",
+             static_cast<unsigned long long>(drag_.generation), drag_.target,
+             reason != nullptr ? reason : L"unspecified",
+             static_cast<unsigned long>(error));
+    if (!nativeOnlyFailureNotified_) {
+        nativeOnlyFailureNotified_ = true;
+        std::wstring message = L"“仅 SC_MOVE”模式的原生拖动失败";
+        if (error != ERROR_SUCCESS) {
+            message.append(L"（错误代码 ");
+            message.append(std::to_wstring(error));
+            message.append(L"）");
+        }
+        message.append(L"。请在设置中切换到“自动”或“仅兼容模式”。");
+        ShowTrayNotification(L"SuperDrag", message.c_str(), NIIF_WARNING);
+    }
+    if (nativeAttempted) {
+        CompleteNativeDrag(reason);
+    } else {
+        EndDrag(reason);
+    }
 }
 
 void SuperDragApp::RestoreMouseHookAfterNativeDrag() {
@@ -1912,6 +2073,16 @@ void SuperDragApp::CreateSettingsControls() {
            BS_OWNERDRAW | WS_TABSTOP, kControlAlt);
     create(0, L"BUTTON", L"Shi&ft",
            BS_OWNERDRAW | WS_TABSTOP, kControlShift);
+    create(0, L"STATIC",
+           L"拖动模式（自动模式会在 SC_MOVE 失败时使用兼容模式）",
+           SS_OWNERDRAW | WS_CLIPSIBLINGS, kControlDragModeGroup);
+    create(0, L"BUTTON", L"自动（推荐）",
+           BS_OWNERDRAW | WS_TABSTOP | WS_GROUP,
+           kControlDragModeAutomatic);
+    create(0, L"BUTTON", L"仅 SC_MOVE",
+           BS_OWNERDRAW | WS_TABSTOP, kControlDragModeNative);
+    create(0, L"BUTTON", L"仅兼容模式",
+           BS_OWNERDRAW | WS_TABSTOP, kControlDragModeCompatibility);
     create(0, L"BUTTON", L"登录 Windows 时自动启动(&U)",
            BS_OWNERDRAW | WS_TABSTOP, kControlStartup);
     create(0, L"STATIC",
@@ -1941,14 +2112,17 @@ void SuperDragApp::LayoutSettingsControls(UINT dpi) {
     using Layout = ui::SettingsLayout;
 
     const RECT group_rc = Layout::ModifierGroup(dpi, client_width);
-    const RECT startup_rc = Layout::StartupCheckbox(dpi, group_rc.bottom);
+    const RECT drag_mode_group_rc =
+        Layout::DragModeGroup(dpi, client_width, group_rc.bottom);
+    const RECT startup_rc =
+        Layout::StartupCheckbox(dpi, drag_mode_group_rc.bottom);
     const RECT help_rc =
         Layout::HelpLabel(dpi, client_width, startup_rc.bottom);
     struct ControlPlacement {
         int id;
         RECT rect;
     };
-    const std::array<ControlPlacement, 11> placements{{
+    const std::array<ControlPlacement, 15> placements{{
         {kControlEnabled, Layout::EnabledCheckbox(dpi)},
         {kControlModifierGroup, group_rc},
         {kControlWin,
@@ -1959,6 +2133,16 @@ void SuperDragApp::LayoutSettingsControls(UINT dpi) {
          Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 2)},
         {kControlShift,
          Layout::ModifierCheckbox(dpi, group_rc.left, group_rc.top, 3)},
+        {kControlDragModeGroup, drag_mode_group_rc},
+        {kControlDragModeAutomatic,
+         Layout::DragModeOption(dpi, drag_mode_group_rc.left,
+                                drag_mode_group_rc.top, 0)},
+        {kControlDragModeNative,
+         Layout::DragModeOption(dpi, drag_mode_group_rc.left,
+                                drag_mode_group_rc.top, 1)},
+        {kControlDragModeCompatibility,
+         Layout::DragModeOption(dpi, drag_mode_group_rc.left,
+                                drag_mode_group_rc.top, 2)},
         {kControlStartup, startup_rc},
         {kControlHelp, help_rc},
         {kControlStatus,
@@ -2025,6 +2209,8 @@ void SuperDragApp::LoadSettingsIntoControls() {
                 (settings_.modifierMask & kModifierAlt) != 0);
     SetCheckbox(settingsWindow_, kControlShift,
                 (settings_.modifierMask & kModifierShift) != 0);
+    SetDragModeSelection(settingsWindow_,
+                         DragModeControlId(settings_.dragEngineMode));
 
     bool startupEnabled = false;
     std::wstring error;
@@ -2099,6 +2285,7 @@ void SuperDragApp::SaveSettingsFromControls() {
     if (IsCheckboxChecked(settingsWindow_, kControlShift)) {
         requested.modifierMask |= kModifierShift;
     }
+    requested.dragEngineMode = SelectedDragEngineMode(settingsWindow_);
 
     if (!IsValidModifierMask(requested.modifierMask)) {
         SetSettingsStatus(L"请选择 1 至 3 个修饰键。", true);

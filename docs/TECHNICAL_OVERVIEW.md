@@ -106,7 +106,8 @@ WH_MOUSE_LL
   → 窗口过滤和完整性等级检查
   → 建立 DragState
   → 吞掉真实左键按下，避免客户区控件误触
-  → NativeMoveWorker 同步发送 WM_NCLBUTTONDOWN + HTCAPTION
+  → 按 DragEngineMode 选择原生、兼容或拒绝启动
+  → 原生路径由 NativeMoveWorker 同步发送 WM_NCLBUTTONDOWN + HTCAPTION
   → 目标 DefWindowProc 进入 SC_MOVE 原生模态循环
   → 移动和左键释放继续传给系统，由 Windows 完成移动、Snap 和恢复
   → EVENT_SYSTEM_MOVESIZESTART/END 确认原生循环状态
@@ -117,6 +118,8 @@ WH_MOUSE_LL
 
 - `CurrentModifierMask()` 使用 `GetAsyncKeyState`。
 - `IsExactModifierMatch()` 要求没有额外修饰键。
+- 每次手势在开始时快照 `DragEngineMode`：自动模式优先原生并允许兼容
+  回退，仅 SC_MOVE 禁止所有回退，仅兼容模式不提交原生请求。
 - `NativeMoveWorker` 同步调用 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`；调用会
   阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
 - 初始左键按下被低级钩子吞掉后，`GetAsyncKeyState` 不会反映这次按下；
@@ -124,7 +127,8 @@ WH_MOUSE_LL
 - 原生循环开始后 SuperDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
   跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
 - 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。
-  状态机等待 100ms 排除 WinEvent 投递延迟，之后才进入手动回退。
+  状态机等待 100ms 排除 WinEvent 投递延迟；自动模式之后进入兼容
+  回退，仅 SC_MOVE 则结束当前拖动并每个运行周期最多通知一次。
 - 回退用的 `WindowMoveWorker` 同时最多执行一次同步 `SetWindowPos`，等待请求只有
   一个；高频坐标覆盖旧坐标，不会向目标线程堆积异步位置请求。
 - 每个请求和完成结果携带单调递增的 drag generation，旧拖动的迟到结果不会修改
@@ -133,7 +137,8 @@ WH_MOUSE_LL
   保留共享内部状态，不持有 `SuperDragApp` 指针，可以安全 detach。
 - 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时则替换原生工作线程。
   每次原生拖动结束都会重装低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
-- 手动回退继续使用原有最大化恢复、500ms 最终坐标等待和按键看门狗。
+- 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子
+  观察到的真实左键释放结束拖动。
 
 ### 重要历史与限制
 
@@ -172,6 +177,7 @@ HKCU\Software\SuperDrag
 
 - `Enabled`
 - `ModifierMask`
+- `DragMode`
 - `FirstRunCompleted`
 - `PrivilegeHintShown`
 
@@ -182,6 +188,14 @@ HKCU\Software\SuperDrag
 - Shift：`0x0004`
 - Win：`0x0008`
 
+`DragMode` 为 DWORD：
+
+- 自动：`0`
+- 仅 SC_MOVE：`1`
+- 仅兼容模式：`2`
+
+缺失或非法值均回退为自动模式。
+
 开机启动位置：
 
 ```text
@@ -191,7 +205,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 值内容是带双引号的当前 EXE 绝对路径。程序启动时会在开机启动已开启的情况下校准路径。
 
-设置保存会先快照四个原注册表值；任一写入失败时恢复已经写入的值。开机启动修改
+设置保存会先快照五个原注册表值；任一写入失败时恢复已经写入的值。开机启动修改
 失败时也会恢复主设置，并在恢复本身失败时向用户报告。
 
 ## 8. 设置窗口 UI
@@ -201,6 +215,8 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 特别注意：
 
 - 复选框状态保存在控件的 `GWLP_USERDATA`，不使用 `BM_GETCHECK/BM_SETCHECK`。
+- 拖动模式使用三枚互斥 owner-draw 单选控件，选中状态同样保存在
+  `GWLP_USERDATA`。
 - 不要把 `BS_OWNERDRAW` 与其他 `BS_*` 按钮类型直接组合；默认保存按钮通过
   `DM_GETDEFID` 提供键盘语义，选中状态仍由 `GWLP_USERDATA` 管理。
 - 快捷键分组必须保持为 `STATIC + SS_OWNERDRAW + WS_CLIPSIBLINGS`。
@@ -208,7 +224,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 - 每个 owner-draw 控件必须完整填充自身背景，否则点击、焦点变化或主题刷新后可能出现控件消失。
 - 分组内 Win/Ctrl/Alt/Shift 使用 Surface 背景，其他复选框使用窗口背景。
 - 支持浅色、深色、高对比度和 `WM_DPICHANGED`。
-- 最小客户区为 480×400 个 96-DPI 逻辑像素。
+- 最小客户区为 480×500 个 96-DPI 逻辑像素。
 
 ## 9. 资源和清单注意事项
 
