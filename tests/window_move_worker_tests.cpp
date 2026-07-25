@@ -11,6 +11,10 @@
 #include <mutex>
 #include <vector>
 
+namespace native_move_worker_tests {
+void Run(int* failures);
+}
+
 namespace {
 
 int failures = 0;
@@ -364,6 +368,7 @@ int main() {
     TestNewGenerationReplacesStaleCompletion();
     TestFinalReleaseCoordinateWins();
     TestStopAcceptingRejectsNewMoves();
+    native_move_worker_tests::Run(&failures);
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;

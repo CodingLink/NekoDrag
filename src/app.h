@@ -1,11 +1,13 @@
 #pragma once
 
 #include "core.h"
+#include "native_move_worker.h"
 #include "ui_theme.h"
 #include "window_move_worker.h"
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -33,6 +35,13 @@ class SuperDragApp {
         Failed,
     };
 
+    enum class DragMode {
+        None,
+        NativeStarting,
+        NativeActive,
+        ManualFallback,
+    };
+
     struct DragState {
         bool active = false;
         bool beginPending = false;
@@ -42,8 +51,17 @@ class SuperDragApp {
         bool restoring = false;
         bool movementFailed = false;
         bool moveRequested = false;
+        bool nativeMoveStarted = false;
+        bool nativeMoveReturned = false;
+        bool nativeButtonReleased = false;
+        bool nativeMoveEndObserved = false;
         unsigned restoreAttempts = 0;
         std::uint64_t generation = 0;
+        std::uint64_t manualRequests = 0;
+        std::uint64_t manualCompletions = 0;
+        std::uint64_t manualCoalescedRequests = 0;
+        std::uint64_t manualMaxElapsedUs = 0;
+        DragMode mode = DragMode::None;
         HWND target = nullptr;
         Point startCursor{};
         Point latestCursor{};
@@ -60,6 +78,9 @@ class SuperDragApp {
                                                WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK MouseHookProc(int code, WPARAM message,
                                           LPARAM lParam);
+    static void CALLBACK NativeMoveEventProc(
+        HWINEVENTHOOK eventHook, DWORD event, HWND window, LONG objectId,
+        LONG childId, DWORD eventThread, DWORD eventTime);
 
     bool Initialize(std::wstring* error);
     bool EnsureSingleInstance();
@@ -67,6 +88,11 @@ class SuperDragApp {
     bool CreateMainWindow(std::wstring* error);
     bool CreateSettingsWindow(std::wstring* error);
     bool StartMoveWorker(std::wstring* error);
+    void InitializeNativeMoveInfrastructure();
+    bool StartNativeMoveWorker();
+    bool InstallNativeMoveEventHook();
+    void RemoveNativeMoveEventHook();
+    void AbandonAndRestartNativeMoveWorker();
     void Shutdown();
 
     LRESULT OnMainMessage(HWND window, UINT message, WPARAM wParam,
@@ -89,13 +115,21 @@ class SuperDragApp {
     bool IsTargetHigherIntegrity(HWND target) const;
     bool BeginDragFromHook(HWND target, Point cursor);
     void BeginDragOnMessageThread();
-    bool IsDragPositionReady() const noexcept;
+    void BeginManualFallback(bool nativeAttempted);
+    bool IsNativeDrag() const noexcept;
+    void HandleNativeMoveCompleted();
+    void HandleNativeMoveEvent(bool started, std::uint64_t generation,
+                               HWND target);
+    void HandleNativeFallbackTimeout();
+    void NoteNativeButtonReleased();
+    void HandleNativeButtonReleased(std::uint64_t generation, HWND target);
+    void CompleteNativeDrag(const wchar_t* reason);
+    void RestoreMouseHookAfterNativeDrag();
     bool SubmitLatestDragPosition(bool finalRequest);
-    void BeginDragRelease();
     void HandleMoveCompleted();
     void ScheduleDragUpdate();
     void ApplyLatestDragPosition();
-    void EndDrag(const wchar_t* reason);
+    void EndDrag(const wchar_t* reason, bool trace = true);
     void FailCurrentDrag(bool showPrivilegeHint,
                          DWORD error = ERROR_SUCCESS);
 
@@ -132,6 +166,11 @@ class SuperDragApp {
     UserSettings settings_{};
     std::unique_ptr<ui::UiTheme> theme_;
     std::unique_ptr<WindowMoveWorker> moveWorker_;
+    std::unique_ptr<NativeMoveWorker> nativeMoveWorker_;
+    HWINEVENTHOOK nativeMoveEventHook_ = nullptr;
+    std::atomic<HWND> nativeEventCompletionWindow_{nullptr};
+    std::atomic<std::uint64_t> nativeEventGeneration_{0};
+    bool nativeMoveAvailable_ = false;
     HookRuntimeState hookRuntimeState_ = HookRuntimeState::Stopped;
     std::size_t hookRetryIndex_ = 0;
     DWORD lastHookError_ = ERROR_SUCCESS;
@@ -141,8 +180,6 @@ class SuperDragApp {
     bool settingsStatusError_ = false;
     DragState drag_{};
     std::uint64_t dragGenerationCounter_ = 0;
-    DWORD lastMoveTraceTick_ = 0;
-    DWORD lastMoveCompletionTraceTick_ = 0;
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;
 };

@@ -29,6 +29,7 @@ if(WIN32)
     )
 
     add_library(superdrag_window_move STATIC
+        src/native_move_worker.cpp
         src/window_move_worker.cpp
     )
     target_include_directories(superdrag_window_move PUBLIC src)
@@ -101,6 +102,7 @@ if(BUILD_TESTING)
 
     if(WIN32)
         add_executable(superdrag_window_move_tests
+            tests/native_move_worker_tests.cpp
             tests/window_move_worker_tests.cpp
         )
         target_link_libraries(superdrag_window_move_tests PRIVATE

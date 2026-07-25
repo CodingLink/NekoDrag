@@ -49,6 +49,12 @@ struct WindowTraits {
     bool transientSurface = false;
 };
 
+enum class NativeMoveCompletionAction {
+    Complete,
+    WaitForStartEvent,
+    UseManualFallback,
+};
+
 bool IsValidModifierMask(std::uint32_t mask) noexcept;
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept;
@@ -56,5 +62,8 @@ Point ComputeDraggedOrigin(Point cursor, Point grabOffset) noexcept;
 Point ComputeRestoredOrigin(Point cursor, Rect maximizedRect,
                             Size restoredSize) noexcept;
 bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept;
+NativeMoveCompletionAction DecideNativeMoveCompletion(
+    bool moveSizeStarted, bool logicalButtonDown,
+    bool startGraceExpired) noexcept;
 
 }  // namespace superdrag

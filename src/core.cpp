@@ -75,4 +75,15 @@ bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept {
            !traits.transientSurface;
 }
 
+NativeMoveCompletionAction DecideNativeMoveCompletion(
+    bool moveSizeStarted, bool logicalButtonDown,
+    bool startGraceExpired) noexcept {
+    if (moveSizeStarted || !logicalButtonDown) {
+        return NativeMoveCompletionAction::Complete;
+    }
+    return startGraceExpired
+               ? NativeMoveCompletionAction::UseManualFallback
+               : NativeMoveCompletionAction::WaitForStartEvent;
+}
+
 }  // namespace superdrag

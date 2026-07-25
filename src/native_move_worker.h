@@ -11,37 +11,35 @@
 
 namespace superdrag {
 
-// Serializes cross-process window moves away from the low-level hook thread.
-// At most one request waits behind the in-flight call; newer coordinates
-// replace that pending request.
-class WindowMoveWorker {
+// Runs the target window's native caption move loop away from the low-level
+// mouse hook thread. A successful call remains in flight until the target's
+// DefWindowProc leaves its move/size modal loop.
+class NativeMoveWorker {
   public:
     struct Request {
         std::uint64_t generation = 0;
         HWND target = nullptr;
-        Point origin{};
+        Point startCursor{};
+        int logicalButtonVirtualKey = VK_LBUTTON;
     };
 
     struct Result {
         std::uint64_t generation = 0;
         HWND target = nullptr;
-        Point requestedOrigin{};
-        Point actualOrigin{};
-        bool actualPositionKnown = false;
-        bool success = false;
+        bool dispatched = false;
+        bool buttonDownAfterCall = false;
         DWORD error = ERROR_SUCCESS;
         std::uint64_t elapsedUs = 0;
-        std::uint64_t coalescedRequests = 0;
     };
 
     using MoveFunction = std::function<Result(const Request&)>;
 
-    WindowMoveWorker(HWND completionWindow, UINT completionMessage,
+    NativeMoveWorker(HWND completionWindow, UINT completionMessage,
                      MoveFunction moveFunction = {});
-    ~WindowMoveWorker();
+    ~NativeMoveWorker();
 
-    WindowMoveWorker(const WindowMoveWorker&) = delete;
-    WindowMoveWorker& operator=(const WindowMoveWorker&) = delete;
+    NativeMoveWorker(const NativeMoveWorker&) = delete;
+    NativeMoveWorker& operator=(const NativeMoveWorker&) = delete;
 
     bool Start();
     bool Submit(const Request& request);
@@ -54,7 +52,7 @@ class WindowMoveWorker {
   private:
     struct State;
 
-    static Result MoveWindowSynchronously(const Request& request);
+    static Result RunNativeMove(const Request& request);
     static void Run(const std::shared_ptr<State>& state);
 
     std::shared_ptr<State> state_;

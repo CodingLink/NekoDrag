@@ -1,4 +1,4 @@
-#include "window_move_worker.h"
+#include "native_move_worker.h"
 
 #include <chrono>
 #include <condition_variable>
@@ -8,7 +8,7 @@
 
 namespace superdrag {
 
-struct WindowMoveWorker::State {
+struct NativeMoveWorker::State {
     std::mutex mutex;
     std::condition_variable workReady;
     std::condition_variable resultReady;
@@ -17,14 +17,14 @@ struct WindowMoveWorker::State {
     MoveFunction moveFunction;
     HWND completionWindow = nullptr;
     UINT completionMessage = 0;
-    std::uint64_t coalescedRequests = 0;
     bool completionMessagePending = false;
     bool accepting = false;
+    bool busy = false;
     bool running = false;
     bool stopping = false;
 };
 
-WindowMoveWorker::WindowMoveWorker(HWND completionWindow,
+NativeMoveWorker::NativeMoveWorker(HWND completionWindow,
                                    UINT completionMessage,
                                    MoveFunction moveFunction)
     : state_(std::make_shared<State>()) {
@@ -33,15 +33,15 @@ WindowMoveWorker::WindowMoveWorker(HWND completionWindow,
     if (moveFunction) {
         state_->moveFunction = std::move(moveFunction);
     } else {
-        state_->moveFunction = MoveWindowSynchronously;
+        state_->moveFunction = RunNativeMove;
     }
 }
 
-WindowMoveWorker::~WindowMoveWorker() {
+NativeMoveWorker::~NativeMoveWorker() {
     Stop();
 }
 
-bool WindowMoveWorker::Start() {
+bool NativeMoveWorker::Start() {
     if (thread_.joinable()) {
         return true;
     }
@@ -58,45 +58,47 @@ bool WindowMoveWorker::Start() {
         thread_ = std::thread([state]() { Run(state); });
     } catch (...) {
         std::lock_guard<std::mutex> lock(state_->mutex);
+        state_->accepting = false;
         state_->running = false;
         return false;
     }
     return true;
 }
 
-bool WindowMoveWorker::Submit(const Request& request) {
+bool NativeMoveWorker::Submit(const Request& request) {
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
-        if (!state_->accepting || !state_->running || state_->stopping) {
+        if (!state_->accepting || !state_->running || state_->stopping ||
+            state_->busy) {
             return false;
         }
-        if (state_->pendingRequest.has_value()) {
-            ++state_->coalescedRequests;
-        }
+        state_->busy = true;
         state_->pendingRequest = request;
     }
     state_->workReady.notify_one();
     return true;
 }
 
-void WindowMoveWorker::StopAccepting() {
+void NativeMoveWorker::StopAccepting() {
     std::lock_guard<std::mutex> lock(state_->mutex);
     state_->accepting = false;
-    state_->pendingRequest.reset();
-    state_->coalescedRequests = 0;
+    if (state_->pendingRequest.has_value()) {
+        state_->pendingRequest.reset();
+        state_->busy = false;
+    }
     state_->completionWindow = nullptr;
 }
 
-void WindowMoveWorker::CancelGeneration(std::uint64_t generation) {
+void NativeMoveWorker::CancelGeneration(std::uint64_t generation) {
     std::lock_guard<std::mutex> lock(state_->mutex);
     if (state_->pendingRequest.has_value() &&
         state_->pendingRequest->generation == generation) {
         state_->pendingRequest.reset();
-        state_->coalescedRequests = 0;
+        state_->busy = false;
     }
 }
 
-bool WindowMoveWorker::TakeLatestResult(Result* result) {
+bool NativeMoveWorker::TakeLatestResult(Result* result) {
     if (result == nullptr) {
         return false;
     }
@@ -111,14 +113,15 @@ bool WindowMoveWorker::TakeLatestResult(Result* result) {
     return true;
 }
 
-bool WindowMoveWorker::WaitForResult(Result* result, DWORD timeoutMs) {
+bool NativeMoveWorker::WaitForResult(Result* result, DWORD timeoutMs) {
     if (result == nullptr) {
         return false;
     }
     std::unique_lock<std::mutex> lock(state_->mutex);
+    const std::shared_ptr<State> state = state_;
     const bool ready = state_->resultReady.wait_for(
-        lock, std::chrono::milliseconds(timeoutMs), [this]() {
-            return state_->latestResult.has_value() || !state_->running;
+        lock, std::chrono::milliseconds(timeoutMs), [state]() {
+            return state->latestResult.has_value() || !state->running;
         });
     if (!ready || !state_->latestResult.has_value()) {
         return false;
@@ -129,7 +132,7 @@ bool WindowMoveWorker::WaitForResult(Result* result, DWORD timeoutMs) {
     return true;
 }
 
-void WindowMoveWorker::Stop(DWORD timeoutMs) {
+void NativeMoveWorker::Stop(DWORD timeoutMs) {
     if (!thread_.joinable()) {
         return;
     }
@@ -137,7 +140,10 @@ void WindowMoveWorker::Stop(DWORD timeoutMs) {
         std::lock_guard<std::mutex> lock(state_->mutex);
         state_->accepting = false;
         state_->stopping = true;
-        state_->pendingRequest.reset();
+        if (state_->pendingRequest.has_value()) {
+            state_->pendingRequest.reset();
+            state_->busy = false;
+        }
         state_->completionWindow = nullptr;
     }
     state_->workReady.notify_all();
@@ -147,14 +153,13 @@ void WindowMoveWorker::Stop(DWORD timeoutMs) {
     if (waitResult == WAIT_OBJECT_0) {
         thread_.join();
     } else {
-        // The worker owns the shared state. If a target blocks SetWindowPos,
-        // detaching keeps shutdown bounded without leaving a dangling app
-        // pointer; process teardown will release the blocked OS thread.
+        // The shared state owns everything used by the blocked sender. This
+        // keeps shutdown bounded even if a target stops pumping messages.
         thread_.detach();
     }
 }
 
-WindowMoveWorker::Result WindowMoveWorker::MoveWindowSynchronously(
+NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
     const Request& request) {
     Result result;
     if (request.target == nullptr || !IsWindow(request.target)) {
@@ -165,35 +170,31 @@ WindowMoveWorker::Result WindowMoveWorker::MoveWindowSynchronously(
         result.error = ERROR_TIMEOUT;
         return result;
     }
-
-    SetLastError(ERROR_SUCCESS);
-    if (!SetWindowPos(request.target, nullptr, request.origin.x,
-                      request.origin.y, 0, 0,
-                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
-                          SWP_NOOWNERZORDER | SWP_DEFERERASE)) {
-        result.error = GetLastError();
-        if (result.error == ERROR_SUCCESS) {
-            result.error = ERROR_GEN_FAILURE;
-        }
+    if ((GetAsyncKeyState(request.logicalButtonVirtualKey) & 0x8000) == 0) {
+        result.error = ERROR_CANCELLED;
         return result;
     }
 
-    result.success = true;
-    RECT actual{};
-    if (GetWindowRect(request.target, &actual)) {
-        result.actualOrigin = {
-            static_cast<std::int32_t>(actual.left),
-            static_cast<std::int32_t>(actual.top),
-        };
-        result.actualPositionKnown = true;
+    const LPARAM cursor = MAKELPARAM(
+        static_cast<WORD>(static_cast<SHORT>(request.startCursor.x)),
+        static_cast<WORD>(static_cast<SHORT>(request.startCursor.y)));
+    SetLastError(ERROR_SUCCESS);
+    SendMessageW(request.target, WM_NCLBUTTONDOWN, HTCAPTION, cursor);
+    const DWORD sendError = GetLastError();
+    if (sendError == ERROR_ACCESS_DENIED) {
+        result.error = sendError;
+        return result;
     }
+
+    result.dispatched = true;
+    result.buttonDownAfterCall =
+        (GetAsyncKeyState(request.logicalButtonVirtualKey) & 0x8000) != 0;
     return result;
 }
 
-void WindowMoveWorker::Run(const std::shared_ptr<State>& state) {
+void NativeMoveWorker::Run(const std::shared_ptr<State>& state) {
     for (;;) {
         Request request;
-        std::uint64_t coalescedRequests = 0;
         {
             std::unique_lock<std::mutex> lock(state->mutex);
             state->workReady.wait(lock, [&state]() {
@@ -204,28 +205,23 @@ void WindowMoveWorker::Run(const std::shared_ptr<State>& state) {
             }
             request = *state->pendingRequest;
             state->pendingRequest.reset();
-            coalescedRequests = state->coalescedRequests;
-            state->coalescedRequests = 0;
         }
 
         const auto startedAt = std::chrono::steady_clock::now();
         Result result = state->moveFunction(request);
         result.generation = request.generation;
         result.target = request.target;
-        result.requestedOrigin = request.origin;
         result.elapsedUs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - startedAt)
                 .count());
-        result.coalescedRequests = coalescedRequests;
 
         {
             std::lock_guard<std::mutex> lock(state->mutex);
+            state->busy = false;
             const bool replaceResult =
                 !state->latestResult.has_value() ||
-                result.generation > state->latestResult->generation ||
-                (result.generation == state->latestResult->generation &&
-                 (!result.success || state->latestResult->success));
+                result.generation >= state->latestResult->generation;
             if (replaceResult) {
                 state->latestResult = result;
             }
@@ -233,9 +229,6 @@ void WindowMoveWorker::Run(const std::shared_ptr<State>& state) {
                 state->completionMessage != 0 &&
                 !state->completionMessagePending) {
                 state->completionMessagePending = true;
-                // Post while holding the state lock so StopAccepting cannot
-                // invalidate the completion window between the check and the
-                // non-blocking queue operation.
                 if (!PostMessageW(state->completionWindow,
                                   state->completionMessage, 0, 0)) {
                     state->completionMessagePending = false;
@@ -247,6 +240,7 @@ void WindowMoveWorker::Run(const std::shared_ptr<State>& state) {
 
     {
         std::lock_guard<std::mutex> lock(state->mutex);
+        state->busy = false;
         state->running = false;
     }
     state->resultReady.notify_all();

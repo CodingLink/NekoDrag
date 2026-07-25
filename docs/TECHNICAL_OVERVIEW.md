@@ -1,6 +1,6 @@
 # SuperDrag 项目技术概述
 
-> 本说明基于当前工作区，而不是仅基于 Git HEAD。当前最新修复尚未提交，其他 agent 不应执行 `git reset`、`git checkout --` 或清理未跟踪文件。
+> 本说明基于当前工作区，而不是仅基于 Git HEAD。
 
 ## 1. 项目定位
 
@@ -42,9 +42,9 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 .\build-vs18\Release\SuperDrag.exe
 ```
 
-诊断拖动问题时可用 `-DSUPERDRAG_TRACE=ON` 构建。钩子安装尝试和错误码、
-移动请求与实际坐标、覆盖数量、耗时及拖动结束原因通过 `OutputDebugString`
-输出；高频移动请求和完成日志按 100ms 节流，可用 DebugView 抓取。
+诊断拖动问题时可用 `-DSUPERDRAG_TRACE=ON` 构建。钩子安装、原生移动循环、
+兼容回退、耗时汇总及拖动结束原因通过 `OutputDebugString` 输出，可用 DebugView
+抓取。低级钩子回调不直接输出日志，也不记录每个鼠标移动事件。
 
 ## 3. 模块划分
 
@@ -53,7 +53,8 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 | [main.cpp](../src/main.cpp) | `wWinMain`、DPI Awareness、Common Controls 初始化 |
 | [app.cpp](../src/app.cpp) | 生命周期、消息循环、鼠标钩子、拖动状态机、托盘、设置窗口 |
 | [app.h](../src/app.h) | `SuperDragApp` 和 `DragState` 定义 |
-| [window_move_worker.cpp](../src/window_move_worker.cpp) | 合并最新坐标并在独立线程串行移动窗口 |
+| [native_move_worker.cpp](../src/native_move_worker.cpp) | 在独立线程运行目标窗口的原生标题栏移动循环 |
+| [window_move_worker.cpp](../src/window_move_worker.cpp) | 原生移动被拒绝时合并坐标并串行移动窗口 |
 | [core.cpp](../src/core.cpp) | 修饰键校验、拖动坐标计算、窗口候选过滤 |
 | [settings_store.cpp](../src/settings_store.cpp) | 注册表设置和开机启动 |
 | [layout.h](../src/layout.h) | 设置窗口的 96 DPI 逻辑布局 |
@@ -61,6 +62,7 @@ ctest --test-dir build-vs18 -C Release --output-on-failure
 | [superdrag.rc](../src/superdrag.rc) | 图标和版本资源 |
 | [superdrag.manifest](../src/superdrag.manifest) | DPI、Common Controls v6、`asInvoker` 权限 |
 | [core_tests.cpp](../tests/core_tests.cpp) | 无第三方框架的核心 CTest |
+| [native_move_worker_tests.cpp](../tests/native_move_worker_tests.cpp) | 原生移动线程生命周期与错误路径 CTest |
 | [window_move_worker_tests.cpp](../tests/window_move_worker_tests.cpp) | Windows 移动线程并发与错误路径 CTest |
 | [WINDOWS_QA.md](WINDOWS_QA.md) | Windows 手工验收清单 |
 
@@ -78,7 +80,8 @@ wWinMain
   → 创建 Local\SuperDrag.SingleInstance 互斥量
   → 加载 HKCU 设置
   → 创建隐藏消息窗口
-  → 启动串行窗口移动工作线程
+  → 启动原生移动和兼容回退工作线程
+  → 监听 EVENT_SYSTEM_MOVESIZESTART/END
   → 添加托盘图标
   → 校准开机启动路径
   → Enabled=true 时投递 WH_MOUSE_LL 安装消息
@@ -93,7 +96,7 @@ wWinMain
 
 ## 5. 当前拖动实现
 
-当前实现是“低级鼠标钩子 + 最新位置合并 + 串行移动线程”：
+当前实现是“低级鼠标钩子 + Windows 原生移动循环 + 手动兼容回退”：
 
 ```text
 WH_MOUSE_LL
@@ -102,40 +105,39 @@ WH_MOUSE_LL
   → WindowFromPoint + GA_ROOT
   → 窗口过滤和完整性等级检查
   → 建立 DragState
-  → 吞掉本次左键按下/释放；移动事件继续传递以更新系统光标
-  → 钩子只覆盖容量为 1 的最新移动请求
-  → 工作线程串行同步 SetWindowPos
-  → 完成消息携带 drag generation 返回主线程
-  → 最大化恢复等慢路径仍走 WM_APP 消息
-  → 左键释放后等待最终位置完成（最多 500ms）
+  → 吞掉真实左键按下，避免客户区控件误触
+  → NativeMoveWorker 同步发送 WM_NCLBUTTONDOWN + HTCAPTION
+  → 目标 DefWindowProc 进入 SC_MOVE 原生模态循环
+  → 移动和左键释放继续传给系统，由 Windows 完成移动、Snap 和恢复
+  → EVENT_SYSTEM_MOVESIZESTART/END 确认原生循环状态
+  → 原生消息被拒绝且左键仍按住时，切换到串行 SetWindowPos 回退
 ```
 
 关键行为：
 
 - `CurrentModifierMask()` 使用 `GetAsyncKeyState`。
 - `IsExactModifierMatch()` 要求没有额外修饰键。
-- `WindowMoveWorker` 同时最多执行一次同步 `SetWindowPos`，等待中的请求只有一个；
-  高频鼠标产生的新坐标覆盖旧坐标，不会向目标线程堆积异步位置请求。
-- 同步跨进程调用只会阻塞移动工作线程，不会阻塞安装 `WH_MOUSE_LL` 的 UI 线程；
-  明显无响应的窗口先由 `IsHungAppWindow` 拒绝。
+- `NativeMoveWorker` 同步调用 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`；调用会
+  阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
+- 原生循环开始后 SuperDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
+  跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
+- 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。
+  状态机等待 100ms 排除 WinEvent 投递延迟，之后才进入手动回退。
+- 回退用的 `WindowMoveWorker` 同时最多执行一次同步 `SetWindowPos`，等待请求只有
+  一个；高频坐标覆盖旧坐标，不会向目标线程堆积异步位置请求。
 - 每个请求和完成结果携带单调递增的 drag generation，旧拖动的迟到结果不会修改
   当前状态。`lastAppliedOrigin` 只在工作线程报告成功后更新。
-- 关闭时先拒绝新移动并作废当前 generation，再卸载钩子；工作线程最多等待 250ms。
-  若目标线程仍阻塞，工作线程只保留共享内部状态，不持有 `SuperDragApp` 指针，
-  因而不会在窗口销毁后回调已释放对象。
-- `IsDragPositionReady()` 决定移动走钩子内快路径（稳态）还是消息线程慢路径
-  （开始待处理、最大化恢复中、释放待处理、移动失败）。
-- 最大化窗口先通过 `ShowWindowAsync(SW_RESTORE)` 恢复，再按鼠标相对位置重新计算锚点。
-- 恢复状态每 16ms 检查一次，最多 30 次。
-- 拖动期间左键按下和释放被吞掉，防止目标窗口控件误触；`WM_MOUSEMOVE`
-  在提交最新坐标后继续传给系统，否则低级钩子会阻止光标位置更新并造成窗口抖动。
-- 拖动激活期间有 500ms 看门狗：根据系统主/次键映射检查逻辑左键；按键已抬起但
-  状态机仍 active 时强制 `EndDrag`，并重装可能因超时被 Windows 静默移除的钩子，
-  防止永久吞掉后续点击或后续拖动失效。
+- 关闭时两个工作线程先拒绝请求并作废 generation；最多等待 250ms。阻塞线程只
+  保留共享内部状态，不持有 `SuperDragApp` 指针，可以安全 detach。
+- 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时则替换原生工作线程。
+  每次原生拖动结束都会重装低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
+- 手动回退继续使用原有最大化恢复、500ms 最终坐标等待和按键看门狗。
 
 ### 重要历史与限制
 
-不要直接恢复为“吞掉左键后投递 `WM_NCLBUTTONDOWN + HTCAPTION`”的方案。该方案已经实测无法拖动：真实左键按下被钩子吞掉后，目标窗口缺少原生移动循环所需的输入状态。
+不要把原生启动改回异步 `PostMessage(WM_NCLBUTTONDOWN)`：真实左键按下已经被
+钩子吞掉，异步投递无法可靠建立系统移动循环。当前方案必须在独立线程使用同步
+`SendMessage`，并保持物理按键状态直到目标窗口进入 `SC_MOVE`。
 
 不要在钩子/UI 线程直接同步 `SetWindowPos`，否则目标繁忙会阻塞低级钩子并触发
 `LowLevelHooksTimeout`。也不要在每个鼠标事件上提交 `SWP_ASYNCWINDOWPOS`；实际

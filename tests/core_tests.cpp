@@ -89,12 +89,32 @@ void TestWindowFiltering() {
            "minimized windows are rejected");
 }
 
+void TestNativeMoveCompletionDecision() {
+    using superdrag::DecideNativeMoveCompletion;
+    using superdrag::NativeMoveCompletionAction;
+
+    Expect(DecideNativeMoveCompletion(true, true, false) ==
+               NativeMoveCompletionAction::Complete,
+           "an entered native loop completes even when Escape leaves the "
+           "button down");
+    Expect(DecideNativeMoveCompletion(false, false, false) ==
+               NativeMoveCompletionAction::Complete,
+           "a released button completes a quick native request");
+    Expect(DecideNativeMoveCompletion(false, true, false) ==
+               NativeMoveCompletionAction::WaitForStartEvent,
+           "an early return waits for a delayed move-start event");
+    Expect(DecideNativeMoveCompletion(false, true, true) ==
+               NativeMoveCompletionAction::UseManualFallback,
+           "an ignored native request falls back after the grace period");
+}
+
 }  // namespace
 
 int main() {
     TestModifierValidation();
     TestPositionCalculations();
     TestWindowFiltering();
+    TestNativeMoveCompletionDecision();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
