@@ -243,11 +243,10 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 ## 9. 资源和清单注意事项
 
 - 图标资源位于 `src/assets`，由 `nekodrag.rc` 引用。
-- `scripts/generate_icons.py` 以 `assets/nekodrag.svg` 共用的 16×16 像素矩阵为
-  唯一母版，使用固定布偶猫调色板和最近邻映射生成 16/20/24/32/48/256px
-  应用图标及 16/20/24px 托盘图标；生成过程只依赖 Python 标准库。
-- SVG 使用透明背景与 `shape-rendering="crispEdges"`，不得用平均缩放替换生成器，
-  否则小尺寸托盘图标会产生模糊边缘。
+- `assets/nekodrag.png` 是非像素、透明背景的高分辨率日系动漫布偶猫 Logo 母版，采用两只前爪伸向镜头的抓取构图。
+- `scripts/generate_icons.py` 使用 Pillow/Lanczos 生成 16/20/24/32/48/256px
+  应用图标及 16/20/24px 托盘图标。Pillow 只用于开发期资源生成，必须安装在
+  项目虚拟环境中；应用构建和运行不依赖 Pillow。
 - Manifest 已作为 CMake 源文件交给 MSVC。
 - 不要再向 `.rc` 添加 `RT_MANIFEST`，否则会再次出现：
 

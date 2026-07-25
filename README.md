@@ -2,7 +2,7 @@
 
 NekoDrag 是一个轻量的 Windows 10/11 x64 窗口拖动工具。按住所选修饰键（默认 `Win+Alt`），即可从普通窗口的任意位置按住鼠标左键拖动窗口。
 
-![NekoDrag 像素布偶猫头像](assets/nekodrag.svg)
+![NekoDrag 日系动漫布偶猫双爪头像](assets/nekodrag.png)
 
 ## 功能
 

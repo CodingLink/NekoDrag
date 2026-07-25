@@ -1,62 +1,40 @@
 #!/usr/bin/env python3
-"""Generate NekoDrag pixel-art SVG and ICO files with the standard library."""
+"""Generate NekoDrag ICO files from the transparent raster logo source."""
 
 from pathlib import Path
 import struct
 
-
-TRANSPARENT = (0x00, 0x00, 0x00, 0x00)
-PALETTE = {
-    "O": (0x2F, 0x25, 0x29, 0xFF),  # outline   #2F2529
-    "C": (0xF4, 0xE6, 0xC7, 0xFF),  # cream    #F4E6C7
-    "S": (0x80, 0x64, 0x5A, 0xFF),  # seal     #80645A
-    "B": (0x55, 0xC7, 0xF3, 0xFF),  # blue eye #55C7F3
-    "H": (0xFF, 0xF9, 0xEC, 0xFF),  # highlight #FFF9EC
-    "P": (0xD7, 0x8E, 0x98, 0xFF),  # nose     #D78E98
-}
-
-# The single 16x16 source of truth for every generated asset.
-PIXEL_ART = (
-    "................",
-    ".OO..........OO.",
-    ".OSO........OSO.",
-    ".OSSO......OSSO.",
-    ".OSSSOOOOOOSSSO.",
-    ".OSSSCCCCCCSSSO.",
-    ".OCCSSSSSSSSCCO.",
-    ".OCSSHB..BHSSCO.",
-    ".OCSSBBSSBBSSCO.",
-    ".OCCSSSSSSSSCCO.",
-    ".OCCCCSPPSCCCCO.",
-    ".OCCCCCSSCCCCCO.",
-    ".OOCCCCCCCCCCOO.",
-    "..OOCCCCCCCCOO..",
-    "....OOOOOOOO....",
-    "................",
-)
+try:
+    from PIL import Image
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Pillow is required to regenerate icons. Install it inside the "
+        "project virtual environment with `python3 -m venv .venv`, "
+        "`source .venv/bin/activate`, then `pip install pillow`."
+    ) from exc
 
 
-def validate_pixel_art():
-    """Fail fast if the canonical matrix or palette is inconsistent."""
-    if len(PIXEL_ART) != 16 or any(len(row) != 16 for row in PIXEL_ART):
-        raise ValueError("PIXEL_ART must be exactly 16x16")
-    unknown = set("".join(PIXEL_ART)) - set(PALETTE) - {"."}
-    if unknown:
-        raise ValueError(f"PIXEL_ART uses unknown symbols: {sorted(unknown)}")
+APP_ICON_SIZES = (16, 20, 24, 32, 48, 256)
+TRAY_ICON_SIZES = (16, 20, 24)
 
 
-def render_icon(size):
-    """Render a square BGRA bitmap using nearest-neighbor pixel mapping."""
-    pixels = bytearray(size * size * 4)
-    for y in range(size):
-        source_y = y * 16 // size
-        for x in range(size):
-            source_x = x * 16 // size
-            rgba = PALETTE.get(PIXEL_ART[source_y][source_x], TRANSPARENT)
-            r, g, b, a = rgba
-            offset = (y * size + x) * 4
-            pixels[offset:offset + 4] = bytes((b, g, r, a))
-    return pixels
+def load_source(path):
+    """Load and validate the square transparent PNG master."""
+    with Image.open(path) as image:
+        source = image.convert("RGBA")
+    if source.width != source.height:
+        raise ValueError("The NekoDrag logo source must be square")
+    alpha_minimum, alpha_maximum = source.getchannel("A").getextrema()
+    if alpha_minimum != 0 or alpha_maximum != 255:
+        raise ValueError("The NekoDrag logo source must contain transparency")
+    return source
+
+
+def render_icon(source, size):
+    """Render a smooth BGRA bitmap using high-quality downsampling."""
+    resampling = getattr(Image, "Resampling", Image).LANCZOS
+    rendered = source.resize((size, size), resampling)
+    return rendered.tobytes("raw", "BGRA")
 
 
 def build_bmp_data(width, height, bgra_pixels):
@@ -80,7 +58,6 @@ def build_bmp_data(width, height, bgra_pixels):
         0,              # biClrImportant
     )
 
-    # ICO BMP rows are bottom-up.
     xor = bytearray(xor_size)
     for row in range(height):
         source_offset = (height - 1 - row) * width * 4
@@ -89,7 +66,6 @@ def build_bmp_data(width, height, bgra_pixels):
             bgra_pixels[source_offset:source_offset + width * 4]
         )
 
-    # AND mask: 1bpp, 1 = transparent, 0 = opaque.
     and_mask = bytearray(and_size)
     for row in range(height):
         source_row = height - 1 - row
@@ -103,11 +79,11 @@ def build_bmp_data(width, height, bgra_pixels):
     return header + xor + and_mask
 
 
-def write_ico(path, sizes):
-    """Write an ICO containing one nearest-neighbor bitmap per size."""
+def write_ico(path, sizes, source):
+    """Write an ICO containing one antialiased bitmap per requested size."""
     images = []
     for size in sizes:
-        bitmap = build_bmp_data(size, size, render_icon(size))
+        bitmap = build_bmp_data(size, size, render_icon(source, size))
         images.append((size, bitmap))
 
     header = struct.pack("<HHH", 0, 1, len(images))
@@ -133,38 +109,16 @@ def write_ico(path, sizes):
     path.write_bytes(header + entries + data)
 
 
-def write_svg(path):
-    """Write a crisp SVG composed only of canonical pixel rectangles."""
-    lines = [
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        '<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"',
-        '     viewBox="0 0 16 16" shape-rendering="crispEdges">',
-    ]
-    for y, row in enumerate(PIXEL_ART):
-        for x, symbol in enumerate(row):
-            if symbol == ".":
-                continue
-            r, g, b, _ = PALETTE[symbol]
-            lines.append(
-                f'  <rect x="{x}" y="{y}" width="1" height="1" '
-                f'fill="#{r:02X}{g:02X}{b:02X}"/>'
-            )
-    lines.append("</svg>")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def main():
-    validate_pixel_art()
     root = Path(__file__).resolve().parent.parent
-    svg = root / "assets" / "nekodrag.svg"
+    source_path = root / "assets" / "nekodrag.png"
     app_ico = root / "src" / "assets" / "app.ico"
     tray_ico = root / "src" / "assets" / "tray.ico"
+    source = load_source(source_path)
 
-    write_svg(svg)
-    write_ico(app_ico, (16, 20, 24, 32, 48, 256))
-    write_ico(tray_ico, (16, 20, 24))
-    print(f"Generated {svg}")
+    write_ico(app_ico, APP_ICON_SIZES, source)
+    write_ico(tray_ico, TRAY_ICON_SIZES, source)
+    print(f"Source {source_path}")
     print(f"Generated {app_ico}")
     print(f"Generated {tray_ico}")
 

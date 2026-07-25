@@ -2,5 +2,6 @@
 /out/
 /.vs/
 /.vscode/
+/.venv/
 *.user
 *.suo
