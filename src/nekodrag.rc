@@ -9,9 +9,9 @@ VS_VERSION_INFO VERSIONINFO
  PRODUCTVERSION 0,1,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
- FILEFLAGS VS_FF_DEBUG
+ FILEFLAGS VS_FF_DEBUG | VS_FF_PRERELEASE
 #else
- FILEFLAGS 0x0L
+ FILEFLAGS VS_FF_PRERELEASE
 #endif
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NekoDrag"
             VALUE "FileDescription", "NekoDrag Window Utility"
-            VALUE "FileVersion", "0.1.0"
+            VALUE "FileVersion", "0.1.0beta1"
             VALUE "InternalName", "NekoDrag"
             VALUE "OriginalFilename", "NekoDrag.exe"
             VALUE "ProductName", "NekoDrag"
-            VALUE "ProductVersion", "0.1.0"
+            VALUE "ProductVersion", "0.1.0beta1"
         END
     END
     BLOCK "VarFileInfo"

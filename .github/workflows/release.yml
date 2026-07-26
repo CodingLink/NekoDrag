@@ -1,0 +1,104 @@
+name: Windows CI and Release
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and test
+    runs-on: windows-2025-vs2026
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -G "Visual Studio 18 2026" -A x64
+          -DBUILD_TESTING=ON
+          -DNEKODRAG_TRACE=OFF
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          if ($env:REF_TYPE -eq "tag") {
+              if ($env:REF_NAME -notmatch '^v\d+\.\d+\.\d+(?:(?:alpha|beta|rc)\d+)?$') {
+                  throw "Unsupported release tag: $env:REF_NAME"
+              }
+              $version = $env:REF_NAME.Substring(1)
+          } else {
+              $version = $env:COMMIT_SHA.Substring(0, 7)
+          }
+
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/NekoDrag.exe dist/NekoDrag.exe
+
+          $zip = "dist/NekoDrag-$version-windows-x64.zip"
+          Compress-Archive -Path dist/NekoDrag.exe -DestinationPath $zip
+
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          $filename = Split-Path $zip -Leaf
+          Set-Content "$zip.sha256" "$hash  $filename" -NoNewline -Encoding ascii
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nekodrag-windows-x64
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: nekodrag-windows-x64
+          path: release
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          prerelease=()
+          case "$version" in
+            *alpha*|*beta*|*rc*) prerelease+=(--prerelease) ;;
+          esac
+
+          gh release create "$GITHUB_REF_NAME" release/* \
+            --verify-tag \
+            --generate-notes \
+            --title "NekoDrag $version" \
+            "${prerelease[@]}"
