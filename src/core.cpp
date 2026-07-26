@@ -79,6 +79,59 @@ bool IsExactModifierMatch(std::uint32_t configured,
     return IsValidModifierMask(configured) && configured == currentlyDown;
 }
 
+bool ShouldMigrateLegacyStartup(bool legacySettingsImported,
+                                std::wstring_view command) noexcept {
+    if (!legacySettingsImported) {
+        return false;
+    }
+    if (command.size() < 4 || command.front() != L'"' ||
+        command.back() != L'"') {
+        return false;
+    }
+
+    const std::wstring_view path = command.substr(1, command.size() - 2);
+    if (path.find(L'"') != std::wstring_view::npos) {
+        return false;
+    }
+    const auto isSeparator = [](wchar_t character) {
+        return character == L'\\' || character == L'/';
+    };
+    const bool driveAbsolute =
+        path.size() >= 3 &&
+        ((path[0] >= L'A' && path[0] <= L'Z') ||
+         (path[0] >= L'a' && path[0] <= L'z')) &&
+        path[1] == L':' && isSeparator(path[2]);
+    const bool uncAbsolute = path.size() >= 3 && isSeparator(path[0]) &&
+                             isSeparator(path[1]);
+    if (!driveAbsolute && !uncAbsolute) {
+        return false;
+    }
+    const std::size_t separator = path.find_last_of(L"\\/");
+    if (separator == std::wstring_view::npos || separator + 1 >= path.size()) {
+        return false;
+    }
+
+    constexpr std::wstring_view expectedName = L"SuperDrag.exe";
+    const std::wstring_view fileName = path.substr(separator + 1);
+    if (fileName.size() != expectedName.size()) {
+        return false;
+    }
+    for (std::size_t index = 0; index < fileName.size(); ++index) {
+        wchar_t actual = fileName[index];
+        if (actual >= L'A' && actual <= L'Z') {
+            actual = static_cast<wchar_t>(actual - L'A' + L'a');
+        }
+        wchar_t expected = expectedName[index];
+        if (expected >= L'A' && expected <= L'Z') {
+            expected = static_cast<wchar_t>(expected - L'A' + L'a');
+        }
+        if (actual != expected) {
+            return false;
+        }
+    }
+    return true;
+}
+
 Point ComputeDraggedOrigin(Point cursor, Point grabOffset) noexcept {
     return {SaturatingSubtract(cursor.x, grabOffset.x),
             SaturatingSubtract(cursor.y, grabOffset.y)};

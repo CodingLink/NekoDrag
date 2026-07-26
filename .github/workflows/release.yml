@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Configure
         run: >
@@ -62,7 +62,7 @@ jobs:
           Set-Content "$zip.sha256" "$hash  $filename" -NoNewline -Encoding ascii
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: nekodrag-windows-x64
           path: |
@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Download build artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: nekodrag-windows-x64
           path: release

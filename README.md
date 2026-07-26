@@ -8,6 +8,7 @@
 
 [![CI](https://github.com/CodingLink/NekoDrag/actions/workflows/release.yml/badge.svg)](https://github.com/CodingLink/NekoDrag/actions/workflows/release.yml)
 [![Release](https://img.shields.io/github/v/release/CodingLink/NekoDrag)](https://github.com/CodingLink/NekoDrag/releases)
+[![Version](https://img.shields.io/github/v/tag/CodingLink/NekoDrag?include_prereleases&sort=semver)](https://github.com/CodingLink/NekoDrag/tags)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)](https://github.com/CodingLink/NekoDrag)
 
 **[中文](#中文) · [English](#english)**

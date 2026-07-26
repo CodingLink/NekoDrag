@@ -368,7 +368,8 @@ bool NekoDragApp::Initialize(std::wstring* error) {
     }
 
     std::wstring startupError;
-    if (!ReconcileStartupPath(&startupError)) {
+    if (!ReconcileStartupPath(settingsLoadInfo.importedLegacySettings,
+                              &startupError)) {
         ShowTrayNotification(L"NekoDrag",
                              startupError.empty()
                                  ? L"无法更新开机启动路径。"
@@ -469,17 +470,8 @@ void NekoDragApp::RemoveNativeMoveEventHook() {
     }
 }
 
-void NekoDragApp::AbandonAndRestartNativeMoveWorker() {
+void NekoDragApp::SuspendNativeMoveWorker() {
     nativeMoveAvailable_ = false;
-    if (nativeMoveWorker_ != nullptr) {
-        nativeMoveWorker_->StopAccepting();
-        nativeMoveWorker_->Stop(0);
-        nativeMoveWorker_.reset();
-    }
-    if (!shuttingDown_ && nativeMoveEventHook_ != nullptr &&
-        StartNativeMoveWorker()) {
-        nativeMoveAvailable_ = true;
-    }
 }
 
 bool NekoDragApp::RegisterWindowClasses(std::wstring* error) {
@@ -796,7 +788,7 @@ LRESULT NekoDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                     ND_TRACE(L"native move completion timed out generation=%llu",
                              static_cast<unsigned long long>(
                                  drag_.generation));
-                    AbandonAndRestartNativeMoveWorker();
+                    SuspendNativeMoveWorker();
                     if (drag_.engineMode == DragEngineMode::NativeOnly) {
                         FailNativeOnlyDrag(L"native-only-move-timeout",
                                            ERROR_TIMEOUT, true);
@@ -1400,15 +1392,7 @@ void NekoDragApp::BeginDragOnMessageThread() {
                  drag_.target);
         return;
     }
-    AbandonAndRestartNativeMoveWorker();
-    if (nativeMoveAvailable_ && nativeMoveWorker_ != nullptr &&
-        nativeMoveWorker_->Submit(request)) {
-        ND_TRACE(L"native move worker replaced and request retried "
-                 L"generation=%llu target=%p",
-                 static_cast<unsigned long long>(drag_.generation),
-                 drag_.target);
-        return;
-    }
+    SuspendNativeMoveWorker();
     nativeEventGeneration_.store(0, std::memory_order_release);
     if (AllowsCompatibilityFallback(drag_.engineMode)) {
         ND_TRACE(L"automatic-fallback generation=%llu "
@@ -1512,6 +1496,9 @@ void NekoDragApp::HandleNativeMoveCompleted() {
     if (!nativeMoveWorker_->TakeLatestResult(&result)) {
         return;
     }
+    if (!shuttingDown_ && nativeMoveEventHook_ != nullptr) {
+        nativeMoveAvailable_ = true;
+    }
     const bool currentResult =
         drag_.active && IsNativeDrag() &&
         result.generation == drag_.generation &&
@@ -1532,9 +1519,10 @@ void NekoDragApp::HandleNativeMoveCompleted() {
     drag_.nativeMoveReturned = true;
     KillTimer(mainWindow_, kNativeCompletionTimer);
     if (drag_.nativeMoveStarted && !drag_.nativeMoveEndObserved) {
-        // SendMessage returns only after DefWindowProc leaves the move loop.
-        // The WinEvent end notification can still be queued behind this
-        // completion message, so record the equivalent terminal state here.
+        // A successful synchronous dispatch returns only after DefWindowProc
+        // leaves the move loop. The WinEvent end notification can still be
+        // queued behind this completion message, so record the equivalent
+        // terminal state here.
         drag_.nativeMoveEndObserved = true;
         ND_TRACE(L"native move ended generation=%llu target=%p "
                  L"source=worker-return",
@@ -1648,7 +1636,7 @@ void NekoDragApp::HandleNativeButtonReleased(
         if (error == ERROR_SUCCESS) {
             error = ERROR_GEN_FAILURE;
         }
-        AbandonAndRestartNativeMoveWorker();
+        SuspendNativeMoveWorker();
         if (drag_.engineMode == DragEngineMode::NativeOnly) {
             FailNativeOnlyDrag(L"native-only-completion-timer-failed",
                                error, true);

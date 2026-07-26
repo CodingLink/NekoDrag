@@ -2,8 +2,6 @@
 
 #include <windows.h>
 
-#include <vector>
-
 namespace nekodrag::ui {
 
 // Provides theme colors/brushes and detects Windows light/dark/high-contrast
@@ -41,7 +39,8 @@ class UiTheme {
     bool high_contrast_ = false;
     HBRUSH background_brush_ = nullptr;
     HBRUSH surface_brush_ = nullptr;
-    std::vector<HBRUSH> stale_brushes_;
+    HBRUSH previous_background_brush_ = nullptr;
+    HBRUSH previous_surface_brush_ = nullptr;
 };
 
 // Owner-draw helpers for the settings dialog controls.

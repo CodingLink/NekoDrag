@@ -96,17 +96,19 @@ void UiTheme::Refresh() {
     dark_ = !QueryAppsUseLightTheme();
     high_contrast_ = QueryHighContrast();
 
-    // Move the current brushes to the stale list so they remain valid if the
-    // window is still painting with them; they are deleted in the destructor.
-    if (background_brush_ != nullptr) {
-        stale_brushes_.push_back(background_brush_);
+    if (previous_background_brush_ != nullptr) {
+        DeleteObject(previous_background_brush_);
     }
-    if (surface_brush_ != nullptr) {
-        stale_brushes_.push_back(surface_brush_);
+    if (previous_surface_brush_ != nullptr) {
+        DeleteObject(previous_surface_brush_);
     }
-
+    previous_background_brush_ = background_brush_;
+    previous_surface_brush_ = surface_brush_;
     background_brush_ = CreateSolidBrush(BackgroundColor());
     surface_brush_ = CreateSolidBrush(SurfaceColor());
+
+    // Keep one previous generation alive in case a paint triggered before this
+    // refresh still references it. The next refresh retires that generation.
 }
 
 void UiTheme::DeleteBrushes() noexcept {
@@ -118,12 +120,14 @@ void UiTheme::DeleteBrushes() noexcept {
         DeleteObject(surface_brush_);
         surface_brush_ = nullptr;
     }
-    for (HBRUSH brush : stale_brushes_) {
-        if (brush != nullptr) {
-            DeleteObject(brush);
-        }
+    if (previous_background_brush_ != nullptr) {
+        DeleteObject(previous_background_brush_);
+        previous_background_brush_ = nullptr;
     }
-    stale_brushes_.clear();
+    if (previous_surface_brush_ != nullptr) {
+        DeleteObject(previous_surface_brush_);
+        previous_surface_brush_ = nullptr;
+    }
 }
 
 COLORREF UiTheme::BackgroundColor() const {

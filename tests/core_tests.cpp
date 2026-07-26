@@ -111,6 +111,33 @@ void TestPositionCalculations() {
            "relative positions are clamped to the original window");
 }
 
+void TestLegacyStartupCommandOwnership() {
+    using nekodrag::ShouldMigrateLegacyStartup;
+
+    Expect(ShouldMigrateLegacyStartup(
+               true, L"\"C:\\Tools\\SuperDrag.exe\""),
+           "quoted legacy executable is recognized");
+    Expect(ShouldMigrateLegacyStartup(
+               true, L"\"\\\\server\\share\\SUPERDRAG.EXE\""),
+           "legacy executable comparison is case-insensitive");
+    Expect(!ShouldMigrateLegacyStartup(
+               false, L"\"C:\\Tools\\SuperDrag.exe\""),
+           "legacy command is ignored unless settings were imported");
+    Expect(!ShouldMigrateLegacyStartup(true, L"C:\\Tools\\SuperDrag.exe"),
+           "unquoted legacy command is rejected");
+    Expect(!ShouldMigrateLegacyStartup(
+               true, L"\"C:\\Tools\\SuperDrag.exe\" --background"),
+           "legacy command with arguments is rejected");
+    Expect(!ShouldMigrateLegacyStartup(
+               true, L"\"C:\\Tools\\NekoDrag.exe\""),
+           "different executable is rejected");
+    Expect(!ShouldMigrateLegacyStartup(true, L"\"SuperDrag.exe\""),
+           "relative legacy executable is rejected");
+    Expect(!ShouldMigrateLegacyStartup(
+               true, L"\"Tools\\SuperDrag.exe\""),
+           "relative legacy path with a directory is rejected");
+}
+
 void TestWindowFiltering() {
     using namespace nekodrag;
     WindowTraits valid;
@@ -166,6 +193,7 @@ int main() {
     TestModifierValidation();
     TestDragEngineRouting();
     TestPositionCalculations();
+    TestLegacyStartupCommandOwnership();
     TestWindowFiltering();
     TestNativeMoveCompletionDecision();
     if (failures != 0) {

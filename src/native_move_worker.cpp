@@ -7,6 +7,11 @@
 #include <utility>
 
 namespace nekodrag {
+namespace {
+
+constexpr UINT kNativeMoveHangTimeoutMs = 1000;
+
+}  // namespace
 
 struct NativeMoveWorker::State {
     std::mutex mutex;
@@ -166,19 +171,19 @@ NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
         result.error = ERROR_INVALID_WINDOW_HANDLE;
         return result;
     }
-    if (IsHungAppWindow(request.target)) {
-        result.error = ERROR_TIMEOUT;
-        return result;
-    }
-
     const LPARAM cursor = MAKELPARAM(
         static_cast<WORD>(static_cast<SHORT>(request.startCursor.x)),
         static_cast<WORD>(static_cast<SHORT>(request.startCursor.y)));
+    DWORD_PTR messageResult = 0;
     SetLastError(ERROR_SUCCESS);
-    SendMessageW(request.target, WM_NCLBUTTONDOWN, HTCAPTION, cursor);
-    const DWORD sendError = GetLastError();
-    if (sendError == ERROR_ACCESS_DENIED) {
-        result.error = sendError;
+    const LRESULT sent = SendMessageTimeoutW(
+        request.target, WM_NCLBUTTONDOWN, HTCAPTION, cursor,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_NOTIMEOUTIFNOTHUNG |
+            SMTO_ERRORONEXIT,
+        kNativeMoveHangTimeoutMs, &messageResult);
+    if (sent == 0) {
+        const DWORD sendError = GetLastError();
+        result.error = sendError == ERROR_SUCCESS ? ERROR_TIMEOUT : sendError;
         return result;
     }
 

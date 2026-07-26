@@ -23,11 +23,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NekoDrag"
             VALUE "FileDescription", "NekoDrag Window Utility"
-            VALUE "FileVersion", "0.1.0-beta.1"
+            VALUE "FileVersion", "0.1.0-beta.4"
             VALUE "InternalName", "NekoDrag"
             VALUE "OriginalFilename", "NekoDrag.exe"
             VALUE "ProductName", "NekoDrag"
-            VALUE "ProductVersion", "0.1.0-beta.1"
+            VALUE "ProductVersion", "0.1.0-beta.4"
         END
     END
     BLOCK "VarFileInfo"

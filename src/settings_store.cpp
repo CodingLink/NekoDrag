@@ -150,24 +150,6 @@ bool SnapshotString(HKEY key, const wchar_t* name, StringSnapshot* snapshot,
     return true;
 }
 
-bool ValueExists(HKEY key, const wchar_t* name, bool* exists,
-                 std::wstring* error) {
-    DWORD type = 0;
-    DWORD size = 0;
-    const LSTATUS status =
-        RegQueryValueExW(key, name, nullptr, &type, nullptr, &size);
-    if (status == ERROR_FILE_NOT_FOUND) {
-        *exists = false;
-        return true;
-    }
-    if (status != ERROR_SUCCESS) {
-        SetError(error, L"读取开机启动设置失败", status);
-        return false;
-    }
-    *exists = true;
-    return true;
-}
-
 LSTATUS WriteString(HKEY key, const wchar_t* name,
                     const std::wstring& value) {
     const DWORD size =
@@ -415,17 +397,6 @@ bool QueryStartupEnabled(bool* enabled, std::wstring* command,
         return true;
     }
 
-    StringSnapshot legacy;
-    if (!SnapshotString(key.get(), kLegacyRunValue, &legacy, error)) {
-        return false;
-    }
-    if (!legacy.exists) {
-        return true;
-    }
-    *enabled = true;
-    if (command != nullptr) {
-        *command = legacy.value;
-    }
     return true;
 }
 
@@ -441,16 +412,9 @@ bool SetStartupEnabled(bool enabled, std::wstring* error) {
 
     if (!enabled) {
         const LSTATUS currentStatus = RegDeleteValueW(key.get(), kRunValue);
-        const LSTATUS legacyStatus =
-            RegDeleteValueW(key.get(), kLegacyRunValue);
         if (currentStatus != ERROR_SUCCESS &&
             currentStatus != ERROR_FILE_NOT_FOUND) {
             SetError(error, L"关闭开机启动失败", currentStatus);
-            return false;
-        }
-        if (legacyStatus != ERROR_SUCCESS &&
-            legacyStatus != ERROR_FILE_NOT_FOUND) {
-            SetError(error, L"清理旧开机启动项失败", legacyStatus);
             return false;
         }
         return true;
@@ -461,35 +425,19 @@ bool SetStartupEnabled(bool enabled, std::wstring* error) {
         return false;
     }
 
-    StringSnapshot previousCurrent;
-    if (!SnapshotString(key.get(), kRunValue, &previousCurrent, error)) {
-        return false;
-    }
-
     const LSTATUS writeStatus = WriteString(key.get(), kRunValue, command);
     if (writeStatus != ERROR_SUCCESS) {
         SetError(error, L"启用开机启动失败", writeStatus);
         return false;
     }
-
-    const LSTATUS deleteStatus = RegDeleteValueW(key.get(), kLegacyRunValue);
-    if (deleteStatus != ERROR_SUCCESS &&
-        deleteStatus != ERROR_FILE_NOT_FOUND) {
-        const bool rollbackSucceeded =
-            RestoreString(key.get(), kRunValue, previousCurrent);
-        SetError(error, L"迁移旧开机启动项失败", deleteStatus);
-        if (!rollbackSucceeded && error != nullptr) {
-            error->append(L"；恢复 NekoDrag 启动项时也发生错误");
-        }
-        return false;
-    }
     return true;
 }
 
-bool ReconcileStartupPath(std::wstring* error) {
+bool ReconcileStartupPath(bool allowLegacyMigration, std::wstring* error) {
     RegistryKey key;
     const LSTATUS openStatus = RegOpenKeyExW(
-        HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE, key.receive());
+        HKEY_CURRENT_USER, kRunKey, 0, KEY_QUERY_VALUE | KEY_SET_VALUE,
+        key.receive());
     if (openStatus == ERROR_FILE_NOT_FOUND) {
         return true;
     }
@@ -503,11 +451,15 @@ bool ReconcileStartupPath(std::wstring* error) {
         return false;
     }
 
-    bool legacyExists = false;
-    if (!ValueExists(key.get(), kLegacyRunValue, &legacyExists, error)) {
+    StringSnapshot legacy;
+    if (allowLegacyMigration &&
+        !SnapshotString(key.get(), kLegacyRunValue, &legacy, error)) {
         return false;
     }
-    if (!current.exists && !legacyExists) {
+    const bool ownedLegacy =
+        legacy.exists &&
+        ShouldMigrateLegacyStartup(allowLegacyMigration, legacy.value);
+    if (!current.exists && !ownedLegacy) {
         return true;
     }
 
@@ -515,11 +467,34 @@ bool ReconcileStartupPath(std::wstring* error) {
     if (!ExpectedStartupCommand(&expectedCommand, error)) {
         return false;
     }
-    if (current.exists && !legacyExists &&
+    if (current.exists && !ownedLegacy &&
         _wcsicmp(current.value.c_str(), expectedCommand.c_str()) == 0) {
         return true;
     }
-    return SetStartupEnabled(true, error);
+
+    const LSTATUS writeStatus =
+        WriteString(key.get(), kRunValue, expectedCommand);
+    if (writeStatus != ERROR_SUCCESS) {
+        SetError(error, L"更新开机启动路径失败", writeStatus);
+        return false;
+    }
+    if (!ownedLegacy) {
+        return true;
+    }
+
+    const LSTATUS deleteStatus = RegDeleteValueW(key.get(), kLegacyRunValue);
+    if (deleteStatus == ERROR_SUCCESS ||
+        deleteStatus == ERROR_FILE_NOT_FOUND) {
+        return true;
+    }
+
+    const bool rollbackSucceeded =
+        RestoreString(key.get(), kRunValue, current);
+    SetError(error, L"迁移旧开机启动项失败", deleteStatus);
+    if (!rollbackSucceeded && error != nullptr) {
+        error->append(L"；恢复 NekoDrag 启动项时也发生错误");
+    }
+    return false;
 }
 
 }  // namespace nekodrag

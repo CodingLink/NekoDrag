@@ -125,8 +125,9 @@ WH_MOUSE_LL
 - `IsExactModifierMatch()` 要求没有额外修饰键。
 - 每次手势在开始时快照 `DragEngineMode`：自动模式优先原生并允许兼容
   回退，仅 SC_MOVE 禁止所有回退，仅兼容模式不提交原生请求。
-- `NativeMoveWorker` 同步调用 `SendMessage(WM_NCLBUTTONDOWN, HTCAPTION)`；调用会
-  阻塞到目标 `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
+- `NativeMoveWorker` 同步调用带挂起检测的
+  `SendMessageTimeout(WM_NCLBUTTONDOWN, HTCAPTION)`；正常调用会阻塞到目标
+  `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
 - 初始左键按下被低级钩子吞掉后，`GetAsyncKeyState` 不会反映这次按下；
   原生工作线程会直接发送消息，拖动生命周期以钩子实际观察到的释放事件为准。
 - 原生循环开始后 NekoDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
@@ -140,8 +141,10 @@ WH_MOUSE_LL
   当前状态。`lastAppliedOrigin` 只在工作线程报告成功后更新。
 - 关闭时两个工作线程先拒绝请求并作废 generation；最多等待 250ms。阻塞线程只
   保留共享内部状态，不持有 `NekoDragApp` 指针，可以安全 detach。
-- 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时则替换原生工作线程。
-  每次原生拖动结束都会重装低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
+- 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时会暂停原生路径并让
+  后续自动模式使用兼容路径，迟到的工作线程返回后再恢复原生路径。这样同一时刻
+  最多只有一个潜在阻塞线程，不会反复 detach 并累积。每次原生拖动结束都会重装
+  低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
 - 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子
   观察到的真实左键释放结束拖动。
 
@@ -149,7 +152,7 @@ WH_MOUSE_LL
 
 不要把原生启动改回异步 `PostMessage(WM_NCLBUTTONDOWN)`：真实左键按下已经被
 钩子吞掉，异步投递无法可靠建立系统移动循环。当前方案必须在独立线程使用同步
-`SendMessage`，并使用钩子观察到的按键释放结束或回退拖动。
+`SendMessageTimeout`，并使用钩子观察到的按键释放结束或回退拖动。
 
 不要在钩子/UI 线程直接同步 `SetWindowPos`，否则目标繁忙会阻塞低级钩子并触发
 `LowLevelHooksTimeout`。也不要在每个鼠标事件上提交 `SWP_ASYNCWINDOWPOS`；实际
@@ -218,9 +221,10 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 - 新设置键存在时始终优先，不再读取旧键。
 - 新设置键缺失而 `HKCU\Software\SuperDrag` 存在时，读取旧值且不再显示首次运行页；
   托盘初始化后写入新键，旧键保留以便回退。
-- 开机启动值名为 `NekoDrag`。发现旧 `SuperDrag` 值时先写入当前
-  `NekoDrag.exe` 的带引号绝对路径，再删除旧值；删除失败会恢复新值原状。
-- 关闭开机启动会同时清理新旧两个值名。
+- 开机启动值名为 `NekoDrag`。仅当本次确实导入旧设置且旧 `SuperDrag` 值是
+  指向 `SuperDrag.exe` 的无参数、带引号路径时，才先写入当前 `NekoDrag.exe`
+  的带引号绝对路径再删除旧值；删除失败会恢复新值原状。其他同名值保持不变。
+- 关闭开机启动只删除 NekoDrag 自己的值，不修改未确认归属的旧值。
 
 ## 8. 设置窗口 UI
 

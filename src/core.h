@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string_view>
 
 namespace nekodrag {
 
@@ -77,6 +78,8 @@ DragStartAction SelectDragStartAction(DragEngineMode mode,
 bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept;
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept;
+bool ShouldMigrateLegacyStartup(bool legacySettingsImported,
+                                std::wstring_view command) noexcept;
 Point ComputeDraggedOrigin(Point cursor, Point grabOffset) noexcept;
 Point ComputeRestoredOrigin(Point cursor, Rect maximizedRect,
                             Size restoredSize) noexcept;

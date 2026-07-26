@@ -93,7 +93,7 @@ class NekoDragApp {
     bool StartNativeMoveWorker();
     bool InstallNativeMoveEventHook();
     void RemoveNativeMoveEventHook();
-    void AbandonAndRestartNativeMoveWorker();
+    void SuspendNativeMoveWorker();
     void Shutdown();
 
     LRESULT OnMainMessage(HWND window, UINT message, WPARAM wParam,
