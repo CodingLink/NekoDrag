@@ -102,4 +102,4 @@ jobs:
             --verify-tag \
             --generate-notes \
             --title "NekoDrag $version" \
-            "${prerelease[@]}
+            "${prerelease[@]}"
