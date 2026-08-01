@@ -1,5 +1,6 @@
 #include "native_move_worker.h"
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -10,6 +11,57 @@ namespace nekodrag {
 namespace {
 
 constexpr UINT kNativeMoveHangTimeoutMs = 1000;
+constexpr UINT kInteractionCancelTimeoutMs = 250;
+
+bool IsCancellationRequested(
+    const NativeMoveWorker::Request& request) noexcept {
+    return request.cancelRequested != nullptr &&
+           request.cancelRequested->load(std::memory_order_acquire);
+}
+
+bool CancelInitialInteraction(
+    const NativeMoveWorker::Request& request, DWORD* error) noexcept {
+    const std::array<HWND, 3> candidates{
+        request.captureWindow, request.initialPressWindow, request.target};
+    std::array<HWND, 3> visited{};
+    std::size_t visitedCount = 0;
+
+    for (const HWND candidate : candidates) {
+        if (candidate == nullptr || !IsWindow(candidate)) {
+            continue;
+        }
+        bool duplicate = false;
+        for (std::size_t index = 0; index < visitedCount; ++index) {
+            if (visited[index] == candidate) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+        visited[visitedCount++] = candidate;
+
+        if (candidate != request.target &&
+            GetAncestor(candidate, GA_ROOT) != request.target) {
+            continue;
+        }
+
+        DWORD_PTR ignored = 0;
+        SetLastError(ERROR_SUCCESS);
+        const LRESULT sent = SendMessageTimeoutW(
+            candidate, WM_CANCELMODE, 0, 0,
+            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+            kInteractionCancelTimeoutMs, &ignored);
+        if (sent == 0) {
+            const DWORD sendError = GetLastError();
+            *error = sendError == ERROR_SUCCESS ? ERROR_TIMEOUT : sendError;
+            return false;
+        }
+    }
+    *error = ERROR_SUCCESS;
+    return true;
+}
 
 }  // namespace
 
@@ -171,13 +223,45 @@ NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
         result.error = ERROR_INVALID_WINDOW_HANDLE;
         return result;
     }
+    if (request.cancelInitialInteraction) {
+        result.interactionCancelAttempted = true;
+        result.interactionCancelSucceeded = CancelInitialInteraction(
+            request, &result.interactionCancelError);
+        if (!result.interactionCancelSucceeded) {
+            result.error = result.interactionCancelError;
+            return result;
+        }
+    }
+    if (IsCancellationRequested(request)) {
+        result.error = ERROR_CANCELLED;
+        return result;
+    }
     const LPARAM cursor = MAKELPARAM(
         static_cast<WORD>(static_cast<SHORT>(request.startCursor.x)),
         static_cast<WORD>(static_cast<SHORT>(request.startCursor.y)));
     DWORD_PTR messageResult = 0;
+    if (IsCancellationRequested(request)) {
+        result.error = ERROR_CANCELLED;
+        return result;
+    }
     SetLastError(ERROR_SUCCESS);
+    UINT message = 0;
+    WPARAM wParam = 0;
+    switch (request.strategy) {
+        case NativeMoveStrategy::NonClientCaption:
+            message = WM_NCLBUTTONDOWN;
+            wParam = HTCAPTION;
+            break;
+        case NativeMoveStrategy::SystemCommand:
+            message = WM_SYSCOMMAND;
+            wParam = SC_MOVE | HTCAPTION;
+            break;
+        default:
+            result.error = ERROR_INVALID_PARAMETER;
+            return result;
+    }
     const LRESULT sent = SendMessageTimeoutW(
-        request.target, WM_NCLBUTTONDOWN, HTCAPTION, cursor,
+        request.target, message, wParam, cursor,
         SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_NOTIMEOUTIFNOTHUNG |
             SMTO_ERRORONEXIT,
         kNativeMoveHangTimeoutMs, &messageResult);
@@ -207,9 +291,17 @@ void NativeMoveWorker::Run(const std::shared_ptr<State>& state) {
         }
 
         const auto startedAt = std::chrono::steady_clock::now();
-        Result result = state->moveFunction(request);
+        Result result;
+        if (IsCancellationRequested(request) &&
+            !request.cancelInitialInteraction) {
+            result.error = ERROR_CANCELLED;
+        } else {
+            result = state->moveFunction(request);
+        }
         result.generation = request.generation;
         result.target = request.target;
+        result.strategy = request.strategy;
+        result.attempt = request.attempt;
         result.elapsedUs = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - startedAt)

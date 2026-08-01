@@ -42,9 +42,12 @@ NekoDrag 是一个原生 C++17/Win32 实现的 Windows 10/11 x64 托盘程序。
 
 **拖动引擎**
 
-- 三种可选模式：**自动** / ~~仅 SC_MOVE~~ / **仅兼容模式**
-- 自动模式优先使用 Windows 原生移动循环，原生移动被拒绝时回退到兼容模式
-- ~~原生路径下由系统完成移动、Snap 贴靠、跨屏 DPI 和 Esc 取消，手感与标题栏拖动完全一致~~
+- 三种可选模式：**兼容（推荐）** / **自动（实验）** / **仅原生（诊断）**
+- 新安装默认使用兼容模式；已保存的合法模式保持不变
+- 自动模式优先尝试实验性 Windows 原生移动循环，原生启动失败时回退到兼容模式
+- 自动/仅原生模式会放行真实鼠标按下以建立 Windows 按键状态，并在首次移动时用 `WM_CANCELMODE` 尽力取消控件交互；控件仍可能发生焦点或选择变化
+- 成功进入原生移动循环时，Snap 贴靠、跨屏 DPI 和 Esc 取消由 Windows 处理；不保证所有第三方窗口都支持该路径
+- 兼容模式使用 `SetWindowPos` 跟随鼠标，不提供系统 Snap、跨屏 DPI 重算或 Esc 回滚语义
 - 实现细节见 [技术概述](docs/TECHNICAL_OVERVIEW.md)
 
 **轻量便携**
@@ -130,9 +133,12 @@ NekoDrag is a lightweight Windows 10/11 x64 tray utility written in native C++17
 
 **Drag engine**
 
-- Three selectable modes: **Auto** / ~~SC_MOVE only~~ / **Compatibility only**
-- Auto mode prefers the native Windows move loop and falls back to compatibility mode if the native move is rejected
-- ~~On the native path, Windows itself handles movement, Snap layouts, multi-monitor DPI and Esc-cancel — identical feel to title-bar dragging~~
+- Three selectable modes: **Compatibility (recommended)** / **Auto (experimental)** / **Native only (diagnostic)**
+- New installations default to compatibility mode; existing valid saved modes are preserved
+- Auto first tries the experimental native Windows move loop and falls back to compatibility mode if native startup fails
+- Auto/native-only forwards the real mouse press to establish Windows button state, then uses best-effort `WM_CANCELMODE` cleanup on first movement; controls may still change focus or selection
+- When the native move loop starts successfully, Windows handles Snap, multi-monitor DPI, and Esc cancellation; this path is not supported by every third-party window
+- Compatibility mode follows the pointer with `SetWindowPos`; it does not provide system Snap, cross-monitor DPI recalculation, or Esc rollback semantics
 - See the [technical overview](docs/TECHNICAL_OVERVIEW.md) for implementation details
 
 **Lightweight and portable**

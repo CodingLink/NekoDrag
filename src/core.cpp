@@ -52,7 +52,7 @@ bool IsValidDragEngineMode(std::uint32_t value) noexcept {
 DragEngineMode NormalizeDragEngineMode(std::uint32_t value) noexcept {
     return IsValidDragEngineMode(value)
                ? static_cast<DragEngineMode>(value)
-               : DragEngineMode::Automatic;
+               : DragEngineMode::CompatibilityOnly;
 }
 
 DragStartAction SelectDragStartAction(DragEngineMode mode,
@@ -68,6 +68,10 @@ DragStartAction SelectDragStartAction(DragEngineMode mode,
             return DragStartAction::Compatibility;
     }
     return DragStartAction::Reject;
+}
+
+bool ShouldForwardInitialPress(DragStartAction action) noexcept {
+    return action == DragStartAction::Native;
 }
 
 bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept {
@@ -161,12 +165,100 @@ bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept {
 NativeMoveCompletionAction DecideNativeMoveCompletion(
     bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept {
-    if (moveSizeStarted || buttonReleaseObserved) {
+    if (moveSizeStarted) {
         return NativeMoveCompletionAction::Complete;
+    }
+    if (buttonReleaseObserved && startGraceExpired) {
+        return NativeMoveCompletionAction::UseManualFallback;
     }
     return startGraceExpired
                ? NativeMoveCompletionAction::UseManualFallback
                : NativeMoveCompletionAction::WaitForStartEvent;
+}
+
+bool ShouldRequestNativeMoveOnMovement(
+    bool awaitingMovement, bool requestPending, bool buttonReleased,
+    bool primaryButtonDownObserved) noexcept {
+    return awaitingMovement && !requestPending && !buttonReleased &&
+           primaryButtonDownObserved;
+}
+
+NativeMoveNoStartAction DecideNativeMoveNoStartAction(
+    NativeMoveStrategy strategy, DragEngineMode mode,
+    bool buttonReleased) noexcept {
+    if (buttonReleased) {
+        return AllowsCompatibilityFallback(mode)
+                   ? NativeMoveNoStartAction::UseManualFallback
+                   : NativeMoveNoStartAction::Complete;
+    }
+    if (strategy == NativeMoveStrategy::NonClientCaption) {
+        return NativeMoveNoStartAction::TrySystemCommand;
+    }
+    return AllowsCompatibilityFallback(mode)
+               ? NativeMoveNoStartAction::UseManualFallback
+               : NativeMoveNoStartAction::FailNativeOnly;
+}
+
+PhysicalMouseButton SelectPhysicalPrimaryButton(
+    bool buttonsSwapped) noexcept {
+    return buttonsSwapped ? PhysicalMouseButton::Right
+                          : PhysicalMouseButton::Left;
+}
+
+DragReleaseAction DecideDragReleaseAction(DragReleasePhase phase) noexcept {
+    switch (phase) {
+        case DragReleasePhase::BeginPending:
+        case DragReleasePhase::Manual:
+        case DragReleasePhase::NativeAwaitingMovement:
+            return DragReleaseAction::SuppressAndFinalize;
+        case DragReleasePhase::NativeStarting:
+            return DragReleaseAction::SuppressAndReplay;
+        case DragReleasePhase::NativeActive:
+            return DragReleaseAction::ForwardToNative;
+        case DragReleasePhase::Inactive:
+            return DragReleaseAction::Ignore;
+    }
+    return DragReleaseAction::Ignore;
+}
+
+ForwardedPressReleaseAction DecideForwardedPressReleaseAction(
+    DragReleasePhase phase) noexcept {
+    switch (phase) {
+        case DragReleasePhase::BeginPending:
+        case DragReleasePhase::NativeAwaitingMovement:
+            return ForwardedPressReleaseAction::ForwardAndEnd;
+        case DragReleasePhase::NativeStarting:
+            return ForwardedPressReleaseAction::SuppressAndReplay;
+        case DragReleasePhase::Manual:
+            return ForwardedPressReleaseAction::ForwardAndFinalize;
+        case DragReleasePhase::NativeActive:
+            return ForwardedPressReleaseAction::ForwardToNative;
+        case DragReleasePhase::Inactive:
+            return ForwardedPressReleaseAction::Ignore;
+    }
+    return ForwardedPressReleaseAction::Ignore;
+}
+
+bool ShouldReplayNativeButtonRelease(
+    bool workerReturned, bool moveStarted, bool realReleaseObserved,
+    bool releaseSuppressed, bool releaseAlreadyReplayed,
+    bool generationMatches, bool targetMatches) noexcept {
+    return !workerReturned && moveStarted && realReleaseObserved &&
+           releaseSuppressed && !releaseAlreadyReplayed &&
+           generationMatches && targetMatches;
+}
+
+bool IsNativeMoveEventTimeCurrent(
+    std::uint32_t eventTime, std::uint32_t generationStartedAt) noexcept {
+    constexpr std::uint32_t kHalfTickRange = 0x80000000U;
+    return eventTime - generationStartedAt < kHalfTickRange;
+}
+
+bool IsNativeMoveEventMatch(std::uint64_t currentAttemptToken,
+                            std::uint64_t eventAttemptToken,
+                            bool targetMatches) noexcept {
+    return currentAttemptToken != 0 &&
+           eventAttemptToken == currentAttemptToken && targetMatches;
 }
 
 }  // namespace nekodrag

@@ -37,6 +37,7 @@ class NekoDragApp {
 
     enum class DragMode {
         None,
+        NativeAwaitingMovement,
         NativeStarting,
         NativeActive,
         ManualFallback,
@@ -51,19 +52,33 @@ class NekoDragApp {
         bool restoring = false;
         bool movementFailed = false;
         bool moveRequested = false;
+        bool buttonReleased = false;
         bool nativeMoveStarted = false;
         bool nativeMoveReturned = false;
-        bool nativeButtonReleased = false;
         bool nativeMoveEndObserved = false;
+        bool nativeReleaseSuppressed = false;
+        bool nativeReleaseReplayed = false;
+        bool nativeMovementObserved = false;
+        bool nativeStartMessagePending = false;
+        bool nativePressForwarded = false;
+        bool nativeInteractionCancelAttempted = false;
+        bool nativeInteractionCancelSucceeded = false;
         unsigned restoreAttempts = 0;
+        std::uint32_t nativeAttempt = 0;
         std::uint64_t generation = 0;
+        std::uint64_t nativeEventToken = 0;
         std::uint64_t manualRequests = 0;
         std::uint64_t manualCompletions = 0;
         std::uint64_t manualCoalescedRequests = 0;
         std::uint64_t manualMaxElapsedUs = 0;
-        DragEngineMode engineMode = DragEngineMode::Automatic;
+        DragEngineMode engineMode = DragEngineMode::CompatibilityOnly;
+        DragStartAction startAction = DragStartAction::Reject;
         DragMode mode = DragMode::None;
+        NativeMoveStrategy nativeStrategy =
+            NativeMoveStrategy::NonClientCaption;
         HWND target = nullptr;
+        HWND initialPressWindow = nullptr;
+        HWND nativeCaptureWindow = nullptr;
         Point startCursor{};
         Point latestCursor{};
         Point grabOffset{};
@@ -71,6 +86,7 @@ class NekoDragApp {
         Point lastRequestedOrigin{};
         Point finalRequestedOrigin{};
         Rect maximizedRect{};
+        std::shared_ptr<std::atomic_bool> nativeCancelRequested;
     };
 
     static LRESULT CALLBACK MainWindowProc(HWND window, UINT message,
@@ -112,18 +128,30 @@ class NekoDragApp {
     bool IsConfiguredChordDown() const noexcept;
     std::uint32_t CurrentModifierMask() const noexcept;
 
-    HWND ResolveDragTarget(POINT cursor, bool* restricted) const;
+    HWND ResolveDragTarget(POINT cursor, bool* restricted,
+                           HWND* initialPressWindow) const;
+    HWND ResolveTargetCaptureWindow(HWND target) const;
     bool IsTargetHigherIntegrity(HWND target) const;
-    bool BeginDragFromHook(HWND target, Point cursor);
+    bool BeginDragFromHook(HWND target, HWND initialPressWindow,
+                           Point cursor);
     void BeginDragOnMessageThread();
+    void RequestNativeMoveStart();
+    void HandleNativeMoveStartRequested(std::uint64_t generation,
+                                        HWND target);
+    bool SubmitNativeMoveAttempt(NativeMoveStrategy strategy);
     void BeginManualFallback(bool nativeAttempted);
     bool IsNativeDrag() const noexcept;
+    bool IsNativeMoveAttemptInFlight() const noexcept;
+    bool IsObservedPrimaryButtonDown() const noexcept;
+    bool IsLogicalPrimaryButtonAsyncDown() const noexcept;
     void HandleNativeMoveCompleted();
-    void HandleNativeMoveEvent(bool started, std::uint64_t generation,
+    void HandleNativeMoveEvent(bool started, std::uint64_t eventToken,
                                HWND target);
     void HandleNativeFallbackTimeout();
     void NoteNativeButtonReleased();
     void HandleNativeButtonReleased(std::uint64_t generation, HWND target);
+    bool ReplayNativeButtonRelease();
+    void CancelTargetNativeMove();
     void CompleteNativeDrag(const wchar_t* reason);
     void FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
                             bool nativeAttempted);
@@ -173,7 +201,8 @@ class NekoDragApp {
     std::unique_ptr<NativeMoveWorker> nativeMoveWorker_;
     HWINEVENTHOOK nativeMoveEventHook_ = nullptr;
     std::atomic<HWND> nativeEventCompletionWindow_{nullptr};
-    std::atomic<std::uint64_t> nativeEventGeneration_{0};
+    std::atomic<std::uint64_t> nativeEventToken_{0};
+    std::atomic<std::uint32_t> nativeEventAttemptStartedAt_{0};
     bool nativeMoveAvailable_ = false;
     HookRuntimeState hookRuntimeState_ = HookRuntimeState::Stopped;
     std::size_t hookRetryIndex_ = 0;
@@ -185,6 +214,7 @@ class NekoDragApp {
     bool nativeOnlyFailureNotified_ = false;
     DragState drag_{};
     std::uint64_t dragGenerationCounter_ = 0;
+    std::uint64_t nativeEventTokenCounter_ = 0;
     bool trayIconAdded_ = false;
     bool shuttingDown_ = false;
 };

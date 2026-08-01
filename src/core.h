@@ -30,7 +30,7 @@ enum class DragStartAction {
 struct UserSettings {
     bool enabled = true;
     std::uint32_t modifierMask = kDefaultModifiers;
-    DragEngineMode dragEngineMode = DragEngineMode::Automatic;
+    DragEngineMode dragEngineMode = DragEngineMode::CompatibilityOnly;
     bool firstRunCompleted = false;
     bool privilegeHintShown = false;
 };
@@ -70,11 +70,53 @@ enum class NativeMoveCompletionAction {
     UseManualFallback,
 };
 
+enum class NativeMoveStrategy : std::uint32_t {
+    NonClientCaption = 0,
+    SystemCommand = 1,
+};
+
+enum class NativeMoveNoStartAction {
+    TrySystemCommand,
+    UseManualFallback,
+    Complete,
+    FailNativeOnly,
+};
+
+enum class DragReleasePhase {
+    Inactive,
+    BeginPending,
+    Manual,
+    NativeAwaitingMovement,
+    NativeStarting,
+    NativeActive,
+};
+
+enum class DragReleaseAction {
+    Ignore,
+    SuppressAndFinalize,
+    SuppressAndReplay,
+    ForwardToNative,
+};
+
+enum class ForwardedPressReleaseAction {
+    Ignore,
+    ForwardAndEnd,
+    SuppressAndReplay,
+    ForwardAndFinalize,
+    ForwardToNative,
+};
+
+enum class PhysicalMouseButton {
+    Left,
+    Right,
+};
+
 bool IsValidModifierMask(std::uint32_t mask) noexcept;
 bool IsValidDragEngineMode(std::uint32_t value) noexcept;
 DragEngineMode NormalizeDragEngineMode(std::uint32_t value) noexcept;
 DragStartAction SelectDragStartAction(DragEngineMode mode,
                                       bool nativeAvailable) noexcept;
+bool ShouldForwardInitialPress(DragStartAction action) noexcept;
 bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept;
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept;
@@ -87,5 +129,24 @@ bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept;
 NativeMoveCompletionAction DecideNativeMoveCompletion(
     bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept;
+bool ShouldRequestNativeMoveOnMovement(
+    bool awaitingMovement, bool requestPending, bool buttonReleased,
+    bool primaryButtonDownObserved) noexcept;
+NativeMoveNoStartAction DecideNativeMoveNoStartAction(
+    NativeMoveStrategy strategy, DragEngineMode mode,
+    bool buttonReleased) noexcept;
+PhysicalMouseButton SelectPhysicalPrimaryButton(bool buttonsSwapped) noexcept;
+DragReleaseAction DecideDragReleaseAction(DragReleasePhase phase) noexcept;
+ForwardedPressReleaseAction DecideForwardedPressReleaseAction(
+    DragReleasePhase phase) noexcept;
+bool ShouldReplayNativeButtonRelease(
+    bool workerReturned, bool moveStarted, bool realReleaseObserved,
+    bool releaseSuppressed, bool releaseAlreadyReplayed,
+    bool generationMatches, bool targetMatches) noexcept;
+bool IsNativeMoveEventTimeCurrent(
+    std::uint32_t eventTime, std::uint32_t generationStartedAt) noexcept;
+bool IsNativeMoveEventMatch(std::uint64_t currentAttemptToken,
+                            std::uint64_t eventAttemptToken,
+                            bool targetMatches) noexcept;
 
 }  // namespace nekodrag

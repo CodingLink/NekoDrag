@@ -101,7 +101,8 @@ wWinMain
 
 ## 5. 当前拖动实现
 
-当前实现是“低级鼠标钩子 + Windows 原生移动循环 + 手动兼容回退”：
+当前实现是“低级鼠标钩子 + 默认兼容移动 + 实验性 Windows
+原生移动循环”：
 
 ```text
 WH_MOUSE_LL
@@ -110,11 +111,12 @@ WH_MOUSE_LL
   → WindowFromPoint + GA_ROOT
   → 窗口过滤和完整性等级检查
   → 建立 DragState
-  → 吞掉真实左键按下，避免客户区控件误触
-  → 按 DragEngineMode 选择原生、兼容或拒绝启动
-  → 原生路径由 NativeMoveWorker 同步发送 WM_NCLBUTTONDOWN + HTCAPTION
+  → 按 DragEngineMode 快照按下路由：兼容吞键，实验性原生路径放行真实按下
+  → 原生路径等待首次真实鼠标移动，并确认钩子与异步键状态均为按下
+  → NativeMoveWorker 尽力取消客户区交互，再同步发送 WM_NCLBUTTONDOWN + HTCAPTION
+  → 100ms 内没有匹配的 move-start 时再尝试 WM_SYSCOMMAND(SC_MOVE | HTCAPTION)
   → 目标 DefWindowProc 进入 SC_MOVE 原生模态循环
-  → 移动和左键释放继续传给系统，由 Windows 完成移动、Snap 和恢复
+  → 原生循环激活后，移动和真实左键释放继续传给系统
   → EVENT_SYSTEM_MOVESIZESTART/END 确认原生循环状态
   → 原生消息被拒绝且左键仍按住时，切换到串行 SetWindowPos 回退
 ```
@@ -123,36 +125,63 @@ WH_MOUSE_LL
 
 - `CurrentModifierMask()` 使用 `GetAsyncKeyState`。
 - `IsExactModifierMatch()` 要求没有额外修饰键。
-- 每次手势在开始时快照 `DragEngineMode`：自动模式优先原生并允许兼容
-  回退，仅 SC_MOVE 禁止所有回退，仅兼容模式不提交原生请求。
-- `NativeMoveWorker` 同步调用带挂起检测的
-  `SendMessageTimeout(WM_NCLBUTTONDOWN, HTCAPTION)`；正常调用会阻塞到目标
-  `DefWindowProc` 离开 `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
-- 初始左键按下被低级钩子吞掉后，`GetAsyncKeyState` 不会反映这次按下；
-  原生工作线程会直接发送消息，拖动生命周期以钩子实际观察到的释放事件为准。
-- 原生循环开始后 NekoDrag 不再计算或提交窗口坐标。最大化恢复、贴边布局、
-  跨屏 DPI、Esc 取消和最终释放位置均由 Windows 处理。
-- 如果目标自定义窗口过程忽略原生标题栏消息，调用会在左键仍按住时提前返回。
-  状态机等待 100ms 排除 WinEvent 投递延迟；自动模式之后进入兼容
-  回退，仅 SC_MOVE 则结束当前拖动并每个运行周期最多通知一次。
+- 每次手势在开始时快照 `DragEngineMode`：兼容（推荐）不提交原生
+  请求；自动（实验）优先尝试原生并允许兼容回退；仅原生（诊断）
+  禁止所有回退。
+- 原生模式激活目标后进入 `NativeAwaitingMovement`，并让真实主按钮按下进入
+  Windows 输入队列；兼容模式仍吞掉按下。首次真实、非注入 `WM_MOUSEMOVE`
+  到达后，只有钩子观察状态和 `GetAsyncKeyState` 都仍为按下才提交 attempt 1；
+  重复移动不会重复提交。未移动便释放时放行真实释放并按普通点击结束。
+  `SM_SWAPBUTTON` 用于选择实际主按钮以及竞态释放补发。
+- attempt 1 派发前通过 `GetGUIThreadInfo` 获取目标线程捕获窗口，并按捕获窗口、
+  初始子窗口、根窗口的去重顺序同步发送 `WM_CANCELMODE`。只接受根窗口属于拖动
+  目标的窗口。清理失败或超时不会发送原生移动消息，也不会进入兼容回退；后续
+  真实释放继续放行。该清理是最佳努力，控件仍可能已经处理焦点或选择变化。
+- `NativeMoveWorker` 同步调用带挂起检测的 `SendMessageTimeout`。attempt 1 使用
+  `WM_NCLBUTTONDOWN + HTCAPTION`；消息返回后 100ms 内没有匹配的
+  `EVENT_SYSTEM_MOVESIZESTART`，且主按钮仍按下、取消令牌未置位时，attempt 2
+  使用 `WM_SYSCOMMAND(SC_MOVE | HTCAPTION)`，并在 `lParam` 传递当前屏幕坐标。
+  每种策略每次手势最多执行一次。成功调用会阻塞到目标 `DefWindowProc` 离开
+  `SC_MOVE` 循环，因此不能在钩子或 UI 线程执行。
+- 两个 attempt 共享同一原子取消令牌。工作线程在调用
+  `SendMessageTimeoutW` 前再次检查；若已观察到左键释放，返回
+  `ERROR_CANCELLED` 而不再启动 `SC_MOVE`。
+- 已放行按下但开始消息未处理或尚在 `NativeAwaitingMovement` 时，释放也放行并
+  作为普通点击结束。`NativeStarting` 中的真实释放会被吞掉，并在退出原生状态前
+  补发一次匹配物理主按钮的释放；原生已激活时真实释放直接交给 Windows。
+- 如果取消与消息派发发生竞态，只在真实、非注入释放已被观察到，且
+  generation、目标窗口和 `EVENT_SYSTEM_MOVESIZESTART` 全部匹配时，补发一次
+  带 NekoDrag 标记、与交换键设置相符的物理主按钮释放事件。补发失败则向目标
+  发送 `WM_CANCELMODE`。
+- 原生循环成功开始后 NekoDrag 不再计算或提交窗口坐标。最大化
+  恢复、贴边布局、跨屏 DPI 和 Esc 取消由 Windows 处理；该路径是最佳努力
+  的实验功能，不承诺所有第三方窗口都与标题栏拖动完全一致。
+- 如果目标窗口过程忽略第一种原生标题栏消息，调用会在主按钮仍按住时提前
+  返回。状态机等待 100ms 排除 WinEvent 投递延迟后尝试一次系统命令；第二种
+  策略仍未产生匹配的 move-start 时，自动模式进入兼容回退，仅原生模式结束
+  当前拖动并每个运行周期最多通知一次。
 - 回退用的 `WindowMoveWorker` 同时最多执行一次同步 `SetWindowPos`，等待请求只有
   一个；高频坐标覆盖旧坐标，不会向目标线程堆积异步位置请求。
-- 每个请求和完成结果携带单调递增的 drag generation，旧拖动的迟到结果不会修改
-  当前状态。`lastAppliedOrigin` 只在工作线程报告成功后更新。
+- 每个请求和完成结果携带 drag generation、strategy 和 attempt；每个 attempt
+  另分配单调递增的 WinEvent token，并用事件生成时间过滤开始前的事件。因此
+  第一种策略或旧拖动的迟到事件不会被第二种策略或新拖动接受。
+  `lastAppliedOrigin` 只在工作线程报告成功后更新。
 - 关闭时两个工作线程先拒绝请求并作废 generation；最多等待 250ms。阻塞线程只
   保留共享内部状态，不持有 `NekoDragApp` 指针，可以安全 detach。
-- 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时会暂停原生路径并让
+- 原生状态检测到左键释放后最多等待工作线程返回 1 秒；超时会再次
+  发送 `WM_CANCELMODE`，暂停原生路径并让
   后续自动模式使用兼容路径，迟到的工作线程返回后再恢复原生路径。这样同一时刻
   最多只有一个潜在阻塞线程，不会反复 detach 并累积。每次原生拖动结束都会重装
   低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
-- 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子
-  观察到的真实左键释放结束拖动。
+- 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子观察到的真实
+  左键释放结束拖动。该路径只通过 `SetWindowPos` 移动窗口，不模拟 Windows
+  Snap、跨屏 DPI 重算或 Esc 回滚。
 
 ### 重要历史与限制
 
-不要把原生启动改回异步 `PostMessage(WM_NCLBUTTONDOWN)`：真实左键按下已经被
-钩子吞掉，异步投递无法可靠建立系统移动循环。当前方案必须在独立线程使用同步
-`SendMessageTimeout`，并使用钩子观察到的按键释放结束或回退拖动。
+不要把原生启动提前到低级钩子的按下回调：此时真实主按钮状态尚未完成建立，标准
+窗口可能立即退回且不会产生 move-start。当前方案必须等待首次真实移动，再在独立
+线程使用同步 `SendMessageTimeout`，并使用钩子观察到的按键释放结束或回退拖动。
 
 不要在钩子/UI 线程直接同步 `SetWindowPos`，否则目标繁忙会阻塞低级钩子并触发
 `LowLevelHooksTimeout`。也不要在每个鼠标事件上提交 `SWP_ASYNCWINDOWPOS`；实际
@@ -198,11 +227,12 @@ HKCU\Software\NekoDrag
 
 `DragMode` 为 DWORD：
 
-- 自动：`0`
-- 仅 SC_MOVE：`1`
-- 仅兼容模式：`2`
+- 自动（实验）：`0`
+- 仅原生（诊断）：`1`
+- 兼容（推荐）：`2`
 
-缺失或非法值均回退为自动模式。
+新安装、缺失值或非法值均使用兼容模式。已保存的 `0`/`1`/`2` 值保持
+原有语义，不进行静默迁移。
 
 开机启动位置：
 
@@ -234,7 +264,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 - 复选框状态保存在控件的 `GWLP_USERDATA`，不使用 `BM_GETCHECK/BM_SETCHECK`。
 - 拖动模式使用三枚互斥 owner-draw 单选控件，选中状态同样保存在
-  `GWLP_USERDATA`。
+  `GWLP_USERDATA`；顺序为“兼容（推荐）”、“自动（实验）”、“仅原生（诊断）”。
 - 不要把 `BS_OWNERDRAW` 与其他 `BS_*` 按钮类型直接组合；默认保存按钮通过
   `DM_GETDEFID` 提供键盘语义，选中状态仍由 `GWLP_USERDATA` 管理。
 - 快捷键分组必须保持为 `STATIC + SS_OWNERDRAW + WS_CLIPSIBLINGS`。
@@ -270,6 +300,10 @@ LNK1123: 转换到 COFF 期间失败
 - 1–3 个修饰键校验。
 - 精确修饰键匹配。
 - 三种拖动引擎模式的持久化值校验、默认回退和起始路由。
+- 开始消息前、等待首次移动、原生排队期间和原生激活后的左键释放决策。
+- 首次移动触发条件、重复移动去重，以及两种原生策略的顺序和终止决策。
+- 原生取消令牌阻止派发，以及严格匹配下的单次释放补发决策。
+- 迟到 WinEvent 的 attempt token/起始时间过滤及 32 位系统时钟回绕。
 - 普通拖动坐标。
 - 最大化恢复坐标。
 - 负坐标显示器。
@@ -277,8 +311,9 @@ LNK1123: 转换到 COFF 期间失败
 - 设置页拖动模式分组在 96/144/192 DPI 下的边界和控件间距。
 - 串行移动、最新坐标覆盖、generation 更新和错误结果传递（Windows CTest）。
 
-当前环境已使用 Apple Clang 的 `-Werror` 编译并运行核心测试；移动线程也通过
-Win32 API 桩下的严格编译和并发测试。
+当前 macOS 环境已使用 Apple Clang 的 `-Werror` 编译并运行核心测试，
+并通过 AddressSanitizer/UndefinedBehaviorSanitizer。当前环境没有 Windows SDK，
+本次原生工作线程变更仍需在 Windows CTest 中验证。
 
 尚未在当前环境验证：
 

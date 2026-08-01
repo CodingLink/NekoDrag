@@ -20,8 +20,8 @@ void TestModifierValidation() {
     Expect(defaults.enabled, "dragging is enabled by default");
     Expect(defaults.modifierMask == (kModifierWin | kModifierAlt),
            "default shortcut is Win+Alt");
-    Expect(defaults.dragEngineMode == DragEngineMode::Automatic,
-           "automatic drag routing is the default");
+    Expect(defaults.dragEngineMode == DragEngineMode::CompatibilityOnly,
+           "compatibility drag routing is the safe default");
     Expect(!defaults.firstRunCompleted,
            "a new profile has not completed first-run setup");
     Expect(IsValidModifierMask(kModifierWin), "one modifier is valid");
@@ -57,8 +57,9 @@ void TestDragEngineRouting() {
     Expect(NormalizeDragEngineMode(2) ==
                DragEngineMode::CompatibilityOnly,
            "compatibility registry value is preserved");
-    Expect(NormalizeDragEngineMode(99) == DragEngineMode::Automatic,
-           "invalid registry values fall back to automatic mode");
+    Expect(NormalizeDragEngineMode(99) ==
+               DragEngineMode::CompatibilityOnly,
+           "invalid registry values fall back to compatibility mode");
 
     Expect(SelectDragStartAction(DragEngineMode::Automatic, true) ==
                DragStartAction::Native,
@@ -87,6 +88,12 @@ void TestDragEngineRouting() {
            "native-only mode forbids compatibility fallback");
     Expect(!AllowsCompatibilityFallback(DragEngineMode::CompatibilityOnly),
            "compatibility-only mode never starts a native attempt");
+    Expect(ShouldForwardInitialPress(DragStartAction::Native),
+           "native routing forwards the real primary-button press");
+    Expect(!ShouldForwardInitialPress(DragStartAction::Compatibility),
+           "compatibility routing suppresses the primary-button press");
+    Expect(!ShouldForwardInitialPress(DragStartAction::Reject),
+           "rejected native routing suppresses the shortcut press");
 }
 
 void TestPositionCalculations() {
@@ -174,17 +181,161 @@ void TestNativeMoveCompletionDecision() {
            "an entered native loop completes even when Escape leaves the "
            "button down");
     Expect(DecideNativeMoveCompletion(false, true, false) ==
-               NativeMoveCompletionAction::Complete,
-           "an observed release completes a quick native request");
+               NativeMoveCompletionAction::WaitForStartEvent,
+           "a dispatched pre-start release waits for a delayed start event");
     Expect(DecideNativeMoveCompletion(false, true, true) ==
-               NativeMoveCompletionAction::Complete,
-           "an observed release never falls back after the grace period");
+               NativeMoveCompletionAction::UseManualFallback,
+           "a pre-start release still finalizes after the grace period");
     Expect(DecideNativeMoveCompletion(false, false, false) ==
                NativeMoveCompletionAction::WaitForStartEvent,
            "an early return waits for a delayed move-start event");
     Expect(DecideNativeMoveCompletion(false, false, true) ==
                NativeMoveCompletionAction::UseManualFallback,
            "an ignored native request falls back after the grace period");
+}
+
+void TestNativeMoveStartAndRetryDecisions() {
+    using namespace nekodrag;
+
+    Expect(ShouldRequestNativeMoveOnMovement(true, false, false, true),
+           "hook-observed down starts native dispatch without depending on "
+           "the suppressed Windows async key state");
+    Expect(!ShouldRequestNativeMoveOnMovement(false, false, false, true),
+           "compatibility and inactive states do not start native dispatch");
+    Expect(!ShouldRequestNativeMoveOnMovement(true, true, false, true),
+           "repeated movement cannot queue the same native attempt twice");
+    Expect(!ShouldRequestNativeMoveOnMovement(true, false, true, true),
+           "a released gesture cannot start native dispatch");
+    Expect(!ShouldRequestNativeMoveOnMovement(true, false, false, false),
+           "native dispatch requires the hook-observed primary-button down");
+    Expect(SelectPhysicalPrimaryButton(false) ==
+               PhysicalMouseButton::Left,
+           "normal button mapping checks the physical left button");
+    Expect(SelectPhysicalPrimaryButton(true) ==
+               PhysicalMouseButton::Right,
+           "swapped button mapping checks the physical right button");
+
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::NonClientCaption,
+               DragEngineMode::Automatic, false) ==
+               NativeMoveNoStartAction::TrySystemCommand,
+           "the caption strategy is followed once by the system command");
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::NonClientCaption,
+               DragEngineMode::NativeOnly, false) ==
+               NativeMoveNoStartAction::TrySystemCommand,
+           "native-only mode also performs the ordered second strategy");
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::SystemCommand,
+               DragEngineMode::Automatic, false) ==
+               NativeMoveNoStartAction::UseManualFallback,
+           "automatic mode falls back after both native strategies");
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::SystemCommand,
+               DragEngineMode::NativeOnly, false) ==
+               NativeMoveNoStartAction::FailNativeOnly,
+           "native-only mode reports failure after both strategies");
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::NonClientCaption,
+               DragEngineMode::Automatic, true) ==
+               NativeMoveNoStartAction::UseManualFallback,
+           "release between native attempts cancels automatic dispatch");
+    Expect(DecideNativeMoveNoStartAction(
+               NativeMoveStrategy::NonClientCaption,
+               DragEngineMode::NativeOnly, true) ==
+               NativeMoveNoStartAction::Complete,
+           "release between attempts ends native-only mode");
+}
+
+void TestDragReleaseDecisions() {
+    using namespace nekodrag;
+
+    Expect(DecideDragReleaseAction(DragReleasePhase::Inactive) ==
+               DragReleaseAction::Ignore,
+           "inactive gestures ignore button release");
+    Expect(DecideDragReleaseAction(DragReleasePhase::BeginPending) ==
+               DragReleaseAction::SuppressAndFinalize,
+           "release before begin is suppressed and finalized");
+    Expect(DecideDragReleaseAction(DragReleasePhase::Manual) ==
+               DragReleaseAction::SuppressAndFinalize,
+           "manual release is suppressed and finalized");
+    Expect(DecideDragReleaseAction(
+               DragReleasePhase::NativeAwaitingMovement) ==
+               DragReleaseAction::SuppressAndFinalize,
+           "release before first movement cannot start a native loop");
+    Expect(DecideDragReleaseAction(DragReleasePhase::NativeStarting) ==
+               DragReleaseAction::SuppressAndReplay,
+           "pre-start native release is deferred for replay");
+    Expect(DecideDragReleaseAction(DragReleasePhase::NativeActive) ==
+               DragReleaseAction::ForwardToNative,
+           "active native release is forwarded to the system loop");
+
+    Expect(DecideForwardedPressReleaseAction(
+               DragReleasePhase::BeginPending) ==
+               ForwardedPressReleaseAction::ForwardAndEnd,
+           "a forwarded press released before setup remains a click");
+    Expect(DecideForwardedPressReleaseAction(
+               DragReleasePhase::NativeAwaitingMovement) ==
+               ForwardedPressReleaseAction::ForwardAndEnd,
+           "a forwarded press released before attempt one remains a click");
+    Expect(DecideForwardedPressReleaseAction(
+               DragReleasePhase::NativeStarting) ==
+               ForwardedPressReleaseAction::SuppressAndReplay,
+           "release racing native dispatch is suppressed for one replay");
+    Expect(DecideForwardedPressReleaseAction(DragReleasePhase::Manual) ==
+               ForwardedPressReleaseAction::ForwardAndFinalize,
+           "manual fallback forwards release while finalizing position");
+    Expect(DecideForwardedPressReleaseAction(
+               DragReleasePhase::NativeActive) ==
+               ForwardedPressReleaseAction::ForwardToNative,
+           "an active native loop receives the real forwarded release");
+}
+
+void TestNativeReleaseReplayDecision() {
+    using namespace nekodrag;
+
+    Expect(ShouldReplayNativeButtonRelease(false, true, true, true, false,
+                                           true, true),
+           "a matching native-start event replays a suppressed release");
+    Expect(!ShouldReplayNativeButtonRelease(false, true, true, true, true,
+                                            true, true),
+           "a suppressed release is replayed at most once");
+    Expect(!ShouldReplayNativeButtonRelease(false, true, false, true, false,
+                                            true, true),
+           "replay requires a real observed release");
+    Expect(!ShouldReplayNativeButtonRelease(false, true, true, true, false,
+                                            false, true),
+           "a stale generation cannot replay into a new gesture");
+    Expect(!ShouldReplayNativeButtonRelease(false, true, true, true, false,
+                                            true, false),
+           "a different target cannot receive a replayed release");
+    Expect(!ShouldReplayNativeButtonRelease(true, true, true, true, false,
+                                            true, true),
+           "a completed native request does not receive a late replay");
+}
+
+void TestNativeMoveEventTimeMatching() {
+    using namespace nekodrag;
+
+    Expect(IsNativeMoveEventTimeCurrent(1000, 1000),
+           "an event at generation start is current");
+    Expect(IsNativeMoveEventTimeCurrent(1100, 1000),
+           "an event after generation start is current");
+    Expect(!IsNativeMoveEventTimeCurrent(999, 1000),
+           "an event before generation start is stale");
+    Expect(IsNativeMoveEventTimeCurrent(0x00000010U, 0xFFFFFFF0U),
+           "event time matching survives the system tick wrap");
+    Expect(!IsNativeMoveEventTimeCurrent(0xFFFFFFF0U, 0x00000010U),
+           "a pre-wrap stale event cannot enter a post-wrap generation");
+
+    Expect(IsNativeMoveEventMatch(12, 12, true),
+           "a matching attempt token and target accepts a move event");
+    Expect(!IsNativeMoveEventMatch(12, 11, true),
+           "a late event from attempt one cannot enter attempt two");
+    Expect(!IsNativeMoveEventMatch(12, 12, false),
+           "an event for a different target is rejected");
+    Expect(!IsNativeMoveEventMatch(0, 0, true),
+           "an inactive event token rejects queued events");
 }
 
 }  // namespace
@@ -196,6 +347,10 @@ int main() {
     TestLegacyStartupCommandOwnership();
     TestWindowFiltering();
     TestNativeMoveCompletionDecision();
+    TestNativeMoveStartAndRetryDecisions();
+    TestDragReleaseDecisions();
+    TestNativeReleaseReplayDecision();
+    TestNativeMoveEventTimeMatching();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;

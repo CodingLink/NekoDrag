@@ -4,6 +4,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -11,15 +12,22 @@
 
 namespace nekodrag {
 
-// Runs the target window's native caption move loop away from the low-level
-// mouse hook thread. A successful call remains in flight until the target's
-// DefWindowProc leaves its move/size modal loop.
+// Attempts the target window's native caption move loop away from the
+// low-level mouse hook thread. A successful call remains in flight until the
+// target's DefWindowProc leaves its move/size modal loop.
 class NativeMoveWorker {
   public:
     struct Request {
         std::uint64_t generation = 0;
         HWND target = nullptr;
         Point startCursor{};
+        std::shared_ptr<std::atomic_bool> cancelRequested;
+        NativeMoveStrategy strategy =
+            NativeMoveStrategy::NonClientCaption;
+        std::uint32_t attempt = 0;
+        HWND initialPressWindow = nullptr;
+        HWND captureWindow = nullptr;
+        bool cancelInitialInteraction = false;
     };
 
     struct Result {
@@ -28,6 +36,12 @@ class NativeMoveWorker {
         bool dispatched = false;
         DWORD error = ERROR_SUCCESS;
         std::uint64_t elapsedUs = 0;
+        NativeMoveStrategy strategy =
+            NativeMoveStrategy::NonClientCaption;
+        std::uint32_t attempt = 0;
+        bool interactionCancelAttempted = false;
+        bool interactionCancelSucceeded = false;
+        DWORD interactionCancelError = ERROR_SUCCESS;
     };
 
     using MoveFunction = std::function<Result(const Request&)>;
