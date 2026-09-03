@@ -143,6 +143,16 @@ bool ShouldReplayNativeButtonRelease(
     bool workerReturned, bool moveStarted, bool realReleaseObserved,
     bool releaseSuppressed, bool releaseAlreadyReplayed,
     bool generationMatches, bool targetMatches) noexcept;
+bool ShouldRollbackMaximizedNativeRestore(
+    bool restoreSucceeded, bool moveStarted, bool escapeObserved,
+    bool compatibilityFallbackContinues) noexcept;
+// NekoDrag may have driven the target into a native modal move loop once it
+// forwarded the real press or submitted a native attempt; the loop holds mouse
+// capture until it exits. We should cancel that capture unless we already
+// positively observed the move end (the loop exited on its own).
+bool ShouldCancelTargetNativeMove(bool pressForwarded, unsigned attempt,
+                                  bool moveStarted,
+                                  bool moveEnded) noexcept;
 bool IsNativeMoveEventTimeCurrent(
     std::uint32_t eventTime, std::uint32_t generationStartedAt) noexcept;
 bool IsNativeMoveEventMatch(std::uint64_t currentAttemptToken,

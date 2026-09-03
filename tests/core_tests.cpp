@@ -314,6 +314,36 @@ void TestNativeReleaseReplayDecision() {
            "a completed native request does not receive a late replay");
 }
 
+void TestMaximizedNativeRollbackDecision() {
+    using namespace nekodrag;
+
+    Expect(ShouldRollbackMaximizedNativeRestore(true, false, false, false),
+           "native-only startup failure rolls a restored window back");
+    Expect(ShouldRollbackMaximizedNativeRestore(true, true, true, false),
+           "Escape rolls an active restored native window back");
+    Expect(!ShouldRollbackMaximizedNativeRestore(true, true, false, false),
+           "normal native completion keeps the restored window");
+    Expect(!ShouldRollbackMaximizedNativeRestore(true, false, false, true),
+           "compatibility fallback continues from the restored window");
+    Expect(!ShouldRollbackMaximizedNativeRestore(false, false, true, false),
+           "an unsuccessful restore cannot be rolled back");
+}
+
+void TestShouldCancelTargetNativeMove() {
+    using namespace nekodrag;
+
+    Expect(ShouldCancelTargetNativeMove(true, 0, false, false),
+           "a forwarded press alone can start the target loop");
+    Expect(ShouldCancelTargetNativeMove(false, 1, true, false),
+           "a submitted native attempt may have driven the target loop");
+    Expect(!ShouldCancelTargetNativeMove(true, 1, true, true),
+           "an observed move end already exited the loop");
+    Expect(!ShouldCancelTargetNativeMove(false, 0, false, false),
+           "no press and no attempt cannot have started a loop");
+    Expect(ShouldCancelTargetNativeMove(true, 1, false, false),
+           "a started-but-not-ended loop still needs its capture released");
+}
+
 void TestNativeMoveEventTimeMatching() {
     using namespace nekodrag;
 
@@ -350,6 +380,8 @@ int main() {
     TestNativeMoveStartAndRetryDecisions();
     TestDragReleaseDecisions();
     TestNativeReleaseReplayDecision();
+    TestMaximizedNativeRollbackDecision();
+    TestShouldCancelTargetNativeMove();
     TestNativeMoveEventTimeMatching();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

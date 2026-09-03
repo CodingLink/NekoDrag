@@ -113,7 +113,9 @@ WH_MOUSE_LL
   → 建立 DragState
   → 按 DragEngineMode 快照按下路由：兼容吞键，实验性原生路径放行真实按下
   → 原生路径等待首次真实鼠标移动，并确认钩子与异步键状态均为按下
-  → NativeMoveWorker 尽力取消客户区交互，再同步发送 WM_NCLBUTTONDOWN + HTCAPTION
+  → NativeMoveWorker 尽力取消客户区交互
+  → 最大化目标先执行带超时的 SC_RESTORE，并按相对鼠标锚点定位
+  → 同步发送 WM_NCLBUTTONDOWN + HTCAPTION
   → 100ms 内没有匹配的 move-start 时再尝试 WM_SYSCOMMAND(SC_MOVE | HTCAPTION)
   → 目标 DefWindowProc 进入 SC_MOVE 原生模态循环
   → 原生循环激活后，移动和真实左键释放继续传给系统
@@ -125,8 +127,8 @@ WH_MOUSE_LL
 
 - `CurrentModifierMask()` 使用 `GetAsyncKeyState`。
 - `IsExactModifierMatch()` 要求没有额外修饰键。
-- 每次手势在开始时快照 `DragEngineMode`：兼容（推荐）不提交原生
-  请求；自动（实验）优先尝试原生并允许兼容回退；仅原生（诊断）
+- 每次手势在开始时快照 `DragEngineMode`：兼容模式（推荐）不提交原生
+  请求；自动模式（实验）优先尝试原生并允许兼容回退；原生模式（诊断）
   禁止所有回退。
 - 原生模式激活目标后进入 `NativeAwaitingMovement`，并让真实主按钮按下进入
   Windows 输入队列；兼容模式仍吞掉按下。首次真实、非注入 `WM_MOUSEMOVE`
@@ -137,6 +139,13 @@ WH_MOUSE_LL
   初始子窗口、根窗口的去重顺序同步发送 `WM_CANCELMODE`。只接受根窗口属于拖动
   目标的窗口。清理失败或超时不会发送原生移动消息，也不会进入兼容回退；后续
   真实释放继续放行。该清理是最佳努力，控件仍可能已经处理焦点或选择变化。
+- 最大化原生手势在放行按下前安装一个仅用于本次手势的 `WH_KEYBOARD_LL`。
+  安装失败时自动模式改走兼容路由，仅原生模式拒绝启动，因此不会在无法观察
+  Esc 的情况下预恢复窗口。钩子只记录真实、非注入的 Esc 按下并继续传递该按键。
+- attempt 1 清理交互后，对最大化目标同步发送带超时的 `SC_RESTORE`，等待窗口
+  退出最大化状态，再用实际恢复尺寸和 `ComputeRestoredOrigin` 保持鼠标相对锚点。
+  定位成功且取消令牌仍未置位时才发送标题栏消息；attempt 2 不重复清理或恢复。
+  恢复或定位失败时不派发原生移动消息。
 - `NativeMoveWorker` 同步调用带挂起检测的 `SendMessageTimeout`。attempt 1 使用
   `WM_NCLBUTTONDOWN + HTCAPTION`；消息返回后 100ms 内没有匹配的
   `EVENT_SYSTEM_MOVESIZESTART`，且主按钮仍按下、取消令牌未置位时，attempt 2
@@ -153,13 +162,16 @@ WH_MOUSE_LL
   generation、目标窗口和 `EVENT_SYSTEM_MOVESIZESTART` 全部匹配时，补发一次
   带 NekoDrag 标记、与交换键设置相符的物理主按钮释放事件。补发失败则向目标
   发送 `WM_CANCELMODE`。
-- 原生循环成功开始后 NekoDrag 不再计算或提交窗口坐标。最大化
-  恢复、贴边布局、跨屏 DPI 和 Esc 取消由 Windows 处理；该路径是最佳努力
-  的实验功能，不承诺所有第三方窗口都与标题栏拖动完全一致。
+- 原生循环成功开始后 NekoDrag 不再计算或提交窗口坐标。最大化窗口的首次恢复
+  和锚点定位由 NekoDrag 在循环前完成；后续贴边布局、跨屏 DPI 和移动循环取消
+  由 Windows 处理。若本次临时键盘钩子观察到 Esc，工作线程返回后窗口会重新
+  最大化。该路径是最佳努力功能，不承诺所有第三方窗口都与标题栏拖动完全一致。
 - 如果目标窗口过程忽略第一种原生标题栏消息，调用会在主按钮仍按住时提前
   返回。状态机等待 100ms 排除 WinEvent 投递延迟后尝试一次系统命令；第二种
   策略仍未产生匹配的 move-start 时，自动模式进入兼容回退，仅原生模式结束
   当前拖动并每个运行周期最多通知一次。
+- 最大化目标已恢复但两种策略都未启动时，自动模式从当前恢复位置进入兼容移动；
+  仅原生模式重新最大化。目标已退出或句柄失效时只清理状态，不操作窗口。
 - 回退用的 `WindowMoveWorker` 同时最多执行一次同步 `SetWindowPos`，等待请求只有
   一个；高频坐标覆盖旧坐标，不会向目标线程堆积异步位置请求。
 - 每个请求和完成结果携带 drag generation、strategy 和 attempt；每个 attempt
@@ -227,9 +239,9 @@ HKCU\Software\NekoDrag
 
 `DragMode` 为 DWORD：
 
-- 自动（实验）：`0`
-- 仅原生（诊断）：`1`
-- 兼容（推荐）：`2`
+- 自动模式（实验）：`0`
+- 原生模式（诊断）：`1`
+- 兼容模式（推荐）：`2`
 
 新安装、缺失值或非法值均使用兼容模式。已保存的 `0`/`1`/`2` 值保持
 原有语义，不进行静默迁移。
@@ -264,7 +276,7 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 
 - 复选框状态保存在控件的 `GWLP_USERDATA`，不使用 `BM_GETCHECK/BM_SETCHECK`。
 - 拖动模式使用三枚互斥 owner-draw 单选控件，选中状态同样保存在
-  `GWLP_USERDATA`；顺序为“兼容（推荐）”、“自动（实验）”、“仅原生（诊断）”。
+  `GWLP_USERDATA`；顺序为“兼容模式（推荐）”、“自动模式（实验）”、“原生模式（诊断）”。
 - 不要把 `BS_OWNERDRAW` 与其他 `BS_*` 按钮类型直接组合；默认保存按钮通过
   `DM_GETDEFID` 提供键盘语义，选中状态仍由 `GWLP_USERDATA` 管理。
 - 快捷键分组必须保持为 `STATIC + SS_OWNERDRAW + WS_CLIPSIBLINGS`。
@@ -303,6 +315,7 @@ LNK1123: 转换到 COFF 期间失败
 - 开始消息前、等待首次移动、原生排队期间和原生激活后的左键释放决策。
 - 首次移动触发条件、重复移动去重，以及两种原生策略的顺序和终止决策。
 - 原生取消令牌阻止派发，以及严格匹配下的单次释放补发决策。
+- 最大化预恢复、自动回退、仅原生失败和 Esc 的重新最大化决策。
 - 迟到 WinEvent 的 attempt token/起始时间过滤及 32 位系统时钟回绕。
 - 普通拖动坐标。
 - 最大化恢复坐标。

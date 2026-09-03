@@ -30,9 +30,9 @@ struct SettingsLayout {
 
     static constexpr int kDragModeGroupHeight = 88;
     static constexpr int kDragModeOptionTop = 34;
-    static constexpr std::array<int, 3> kDragModeOptionX = {16, 150, 284};
-    static constexpr std::array<int, 3> kDragModeOptionWidth = {120, 120,
-                                                                132};
+    static constexpr std::array<int, 3> kDragModeOptionX = {16, 152, 288};
+    static constexpr std::array<int, 3> kDragModeOptionWidth = {124, 124,
+                                                                124};
 
     static constexpr int kHelpHeight = 38;
     static constexpr int kStatusHeight = 32;

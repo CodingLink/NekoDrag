@@ -297,16 +297,9 @@ void TestNewGenerationReplacesStaleCompletion() {
 
     Expect(worker.Submit({16, target, {20, 25}}),
            "current generation request is accepted");
-    {
-        std::unique_lock<std::mutex> lock(mutex);
-        Expect(changed.wait_for(lock, std::chrono::seconds(2), [&completed]() {
-                   return completed >= 2;
-               }),
-               "current generation completes");
-    }
 
     WindowMoveWorker::Result result;
-    Expect(worker.WaitForResult(&result, 1000),
+    Expect(WaitForRequestedOrigin(&worker, {20, 25}, &result),
            "latest generation completion is delivered");
     worker.Stop();
     Expect(result.generation == 16,

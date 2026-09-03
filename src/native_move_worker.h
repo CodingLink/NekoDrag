@@ -28,6 +28,8 @@ class NativeMoveWorker {
         HWND initialPressWindow = nullptr;
         HWND captureWindow = nullptr;
         bool cancelInitialInteraction = false;
+        bool restoreMaximized = false;
+        Rect maximizedRect{};
     };
 
     struct Result {
@@ -42,6 +44,10 @@ class NativeMoveWorker {
         bool interactionCancelAttempted = false;
         bool interactionCancelSucceeded = false;
         DWORD interactionCancelError = ERROR_SUCCESS;
+        bool maximizedRestoreAttempted = false;
+        bool maximizedRestoreSucceeded = false;
+        DWORD maximizedRestoreError = ERROR_SUCCESS;
+        Point restoredOrigin{};
     };
 
     using MoveFunction = std::function<Result(const Request&)>;

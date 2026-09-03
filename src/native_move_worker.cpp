@@ -12,6 +12,7 @@ namespace {
 
 constexpr UINT kNativeMoveHangTimeoutMs = 1000;
 constexpr UINT kInteractionCancelTimeoutMs = 250;
+constexpr UINT kMaximizedRestoreTimeoutMs = 500;
 
 bool IsCancellationRequested(
     const NativeMoveWorker::Request& request) noexcept {
@@ -60,6 +61,82 @@ bool CancelInitialInteraction(
         }
     }
     *error = ERROR_SUCCESS;
+    return true;
+}
+
+bool RestoreMaximizedWindow(const NativeMoveWorker::Request& request,
+                            NativeMoveWorker::Result* result) noexcept {
+    result->maximizedRestoreAttempted = true;
+    DWORD_PTR ignored = 0;
+    SetLastError(ERROR_SUCCESS);
+    const LRESULT restored = SendMessageTimeoutW(
+        request.target, WM_SYSCOMMAND, SC_RESTORE, 0,
+        SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+        kNativeMoveHangTimeoutMs, &ignored);
+    if (restored == 0) {
+        const DWORD restoreError = GetLastError();
+        result->maximizedRestoreError =
+            restoreError == ERROR_SUCCESS ? ERROR_TIMEOUT : restoreError;
+        return false;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(
+                              kMaximizedRestoreTimeoutMs);
+    while (IsWindow(request.target) && IsZoomed(request.target) &&
+           std::chrono::steady_clock::now() < deadline) {
+        if (IsCancellationRequested(request)) {
+            result->maximizedRestoreError = ERROR_CANCELLED;
+            return false;
+        }
+        Sleep(10);
+    }
+    if (!IsWindow(request.target)) {
+        result->maximizedRestoreError = ERROR_INVALID_WINDOW_HANDLE;
+        return false;
+    }
+    if (IsZoomed(request.target)) {
+        result->maximizedRestoreError = ERROR_TIMEOUT;
+        return false;
+    }
+
+    result->maximizedRestoreSucceeded = true;
+    RECT restoredRect{};
+    SetLastError(ERROR_SUCCESS);
+    if (!GetWindowRect(request.target, &restoredRect)) {
+        result->maximizedRestoreError = GetLastError();
+        if (result->maximizedRestoreError == ERROR_SUCCESS) {
+            result->maximizedRestoreError = ERROR_GEN_FAILURE;
+        }
+        return false;
+    }
+    const Size restoredSize{
+        static_cast<std::int32_t>(restoredRect.right - restoredRect.left),
+        static_cast<std::int32_t>(restoredRect.bottom - restoredRect.top)};
+    const Point desiredOrigin = ComputeRestoredOrigin(
+        request.startCursor, request.maximizedRect, restoredSize);
+    if (IsHungAppWindow(request.target)) {
+        result->maximizedRestoreError = ERROR_TIMEOUT;
+        return false;
+    }
+    SetLastError(ERROR_SUCCESS);
+    if (!SetWindowPos(request.target, nullptr, desiredOrigin.x,
+                      desiredOrigin.y, 0, 0,
+                      SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                          SWP_NOOWNERZORDER | SWP_DEFERERASE)) {
+        result->maximizedRestoreError = GetLastError();
+        if (result->maximizedRestoreError == ERROR_SUCCESS) {
+            result->maximizedRestoreError = ERROR_GEN_FAILURE;
+        }
+        return false;
+    }
+    RECT actualRect{};
+    result->restoredOrigin = desiredOrigin;
+    if (GetWindowRect(request.target, &actualRect)) {
+        result->restoredOrigin = {
+            static_cast<std::int32_t>(actualRect.left),
+            static_cast<std::int32_t>(actualRect.top)};
+    }
     return true;
 }
 
@@ -231,6 +308,15 @@ NativeMoveWorker::Result NativeMoveWorker::RunNativeMove(
             result.error = result.interactionCancelError;
             return result;
         }
+    }
+    if (IsCancellationRequested(request)) {
+        result.error = ERROR_CANCELLED;
+        return result;
+    }
+    if (request.restoreMaximized &&
+        !RestoreMaximizedWindow(request, &result)) {
+        result.error = result.maximizedRestoreError;
+        return result;
     }
     if (IsCancellationRequested(request)) {
         result.error = ERROR_CANCELLED;

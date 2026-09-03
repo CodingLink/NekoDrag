@@ -248,6 +248,20 @@ bool ShouldReplayNativeButtonRelease(
            generationMatches && targetMatches;
 }
 
+bool ShouldRollbackMaximizedNativeRestore(
+    bool restoreSucceeded, bool moveStarted, bool escapeObserved,
+    bool compatibilityFallbackContinues) noexcept {
+    return restoreSucceeded && !compatibilityFallbackContinues &&
+           (escapeObserved || !moveStarted);
+}
+
+bool ShouldCancelTargetNativeMove(bool pressForwarded, unsigned attempt,
+                                  bool moveStarted,
+                                  bool moveEnded) noexcept {
+    static_cast<void>(moveStarted);
+    return (pressForwarded || attempt != 0) && !moveEnded;
+}
+
 bool IsNativeMoveEventTimeCurrent(
     std::uint32_t eventTime, std::uint32_t generationStartedAt) noexcept {
     constexpr std::uint32_t kHalfTickRange = 0x80000000U;

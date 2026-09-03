@@ -63,6 +63,12 @@ class NekoDragApp {
         bool nativePressForwarded = false;
         bool nativeInteractionCancelAttempted = false;
         bool nativeInteractionCancelSucceeded = false;
+        bool nativeStartedMaximized = false;
+        bool nativeMaximizedRestoreRequested = false;
+        bool nativeMaximizedRestoreAttempted = false;
+        bool nativeMaximizedRestoreSucceeded = false;
+        bool nativeMaximizedRollbackRequired = false;
+        bool nativeEscapeObserved = false;
         unsigned restoreAttempts = 0;
         std::uint32_t nativeAttempt = 0;
         std::uint64_t generation = 0;
@@ -85,6 +91,7 @@ class NekoDragApp {
         Point lastAppliedOrigin{};
         Point lastRequestedOrigin{};
         Point finalRequestedOrigin{};
+        Point nativeRestoredOrigin{};
         Rect maximizedRect{};
         std::shared_ptr<std::atomic_bool> nativeCancelRequested;
     };
@@ -95,6 +102,8 @@ class NekoDragApp {
                                                WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK MouseHookProc(int code, WPARAM message,
                                           LPARAM lParam);
+    static LRESULT CALLBACK NativeEscapeHookProc(int code, WPARAM message,
+                                                 LPARAM lParam);
     static void CALLBACK NativeMoveEventProc(
         HWINEVENTHOOK eventHook, DWORD event, HWND window, LONG objectId,
         LONG childId, DWORD eventThread, DWORD eventTime);
@@ -125,6 +134,11 @@ class NekoDragApp {
                                        const std::wstring& error);
     void CancelMouseHookRetry();
     bool IsMouseHookActive() const noexcept;
+    bool InstallNativeEscapeHook();
+    void RemoveNativeEscapeHook();
+    void ObserveNativeEscape();
+    void HandleNativeEscapeObserved(std::uint64_t generation,
+                                    HWND target);
     bool IsConfiguredChordDown() const noexcept;
     std::uint32_t CurrentModifierMask() const noexcept;
 
@@ -152,6 +166,9 @@ class NekoDragApp {
     void HandleNativeButtonReleased(std::uint64_t generation, HWND target);
     bool ReplayNativeButtonRelease();
     void CancelTargetNativeMove();
+    void RestartNativeMoveWorker();
+    void RollbackMaximizedNativeRestoreIfNeeded(
+        bool compatibilityFallbackContinues);
     void CompleteNativeDrag(const wchar_t* reason);
     void FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
                             bool nativeAttempted);
@@ -192,6 +209,7 @@ class NekoDragApp {
     HWND mainWindow_ = nullptr;
     HWND settingsWindow_ = nullptr;
     HHOOK mouseHook_ = nullptr;
+    HHOOK nativeEscapeHook_ = nullptr;
     HFONT settingsFont_ = nullptr;
     UINT taskbarCreatedMessage_ = 0;
     DWORD ownIntegrityLevel_ = 0;

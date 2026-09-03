@@ -58,7 +58,10 @@ if(WIN32)
     target_compile_options(nekodrag_window_move PRIVATE
         /W4 /permissive- /utf-8 /EHsc
     )
-    target_link_libraries(nekodrag_window_move PUBLIC user32)
+    target_link_libraries(nekodrag_window_move PUBLIC
+        nekodrag_core
+        user32
+    )
     set_property(TARGET nekodrag_window_move PROPERTY
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )

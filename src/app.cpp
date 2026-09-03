@@ -45,6 +45,7 @@ constexpr UINT kMessageNativeMoveStarted = WM_APP + 9;
 constexpr UINT kMessageNativeMoveEnded = WM_APP + 10;
 constexpr UINT kMessageNativeButtonReleased = WM_APP + 11;
 constexpr UINT kMessageStartNativeMove = WM_APP + 12;
+constexpr UINT kMessageNativeEscapeObserved = WM_APP + 13;
 constexpr UINT_PTR kRestoreTimer = 1;
 constexpr UINT_PTR kHookRetryTimer = 3;
 constexpr UINT_PTR kDragReleaseTimer = 4;
@@ -694,6 +695,23 @@ LRESULT CALLBACK NekoDragApp::MouseHookProc(int code, WPARAM message,
         code, message, reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam));
 }
 
+LRESULT CALLBACK NekoDragApp::NativeEscapeHookProc(
+    int code, WPARAM message, LPARAM lParam) {
+    if (gApp != nullptr && code >= 0 &&
+        (message == WM_KEYDOWN || message == WM_SYSKEYDOWN)) {
+        const auto* keyInfo =
+            reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+        if (keyInfo != nullptr && keyInfo->vkCode == VK_ESCAPE &&
+            (keyInfo->flags &
+             (LLKHF_INJECTED | LLKHF_LOWER_IL_INJECTED)) == 0) {
+            gApp->ObserveNativeEscape();
+        }
+    }
+    return CallNextHookEx(gApp != nullptr ? gApp->nativeEscapeHook_
+                                          : nullptr,
+                          code, message, lParam);
+}
+
 void CALLBACK NekoDragApp::NativeMoveEventProc(
     HWINEVENTHOOK, DWORD event, HWND window, LONG, LONG, DWORD,
     DWORD eventTime) {
@@ -774,6 +792,11 @@ LRESULT NekoDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                 static_cast<std::uint64_t>(wParam),
                 reinterpret_cast<HWND>(lParam));
             return 0;
+        case kMessageNativeEscapeObserved:
+            HandleNativeEscapeObserved(
+                static_cast<std::uint64_t>(wParam),
+                reinterpret_cast<HWND>(lParam));
+            return 0;
         case kMessageOpenSettings:
             ShowSettingsWindow();
             return 0;
@@ -819,6 +842,7 @@ LRESULT NekoDragApp::OnMainMessage(HWND window, UINT message, WPARAM wParam,
                     if (drag_.engineMode == DragEngineMode::NativeOnly) {
                         FailNativeOnlyDrag(L"native-only-move-timeout",
                                            ERROR_TIMEOUT, true);
+                        RestartNativeMoveWorker();
                     } else {
                         CompleteNativeDrag(L"native-move-timeout");
                     }
@@ -1078,6 +1102,79 @@ void NekoDragApp::RemoveMouseHook() {
     }
 }
 
+bool NekoDragApp::InstallNativeEscapeHook() {
+    if (nativeEscapeHook_ != nullptr) {
+        return true;
+    }
+    SetLastError(ERROR_SUCCESS);
+    nativeEscapeHook_ = SetWindowsHookExW(
+        WH_KEYBOARD_LL, NativeEscapeHookProc, instance_, 0);
+    if (nativeEscapeHook_ == nullptr) {
+        DWORD error = GetLastError();
+        if (error == ERROR_SUCCESS) {
+            error = ERROR_GEN_FAILURE;
+        }
+        ND_TRACE(L"native Escape hook install failed generation=%llu "
+                 L"error=%lu",
+                 static_cast<unsigned long long>(drag_.generation),
+                 static_cast<unsigned long>(error));
+        return false;
+    }
+    ND_TRACE(L"native Escape hook installed generation=%llu handle=%p",
+             static_cast<unsigned long long>(drag_.generation),
+             nativeEscapeHook_);
+    return true;
+}
+
+void NekoDragApp::RemoveNativeEscapeHook() {
+    if (nativeEscapeHook_ != nullptr) {
+        UnhookWindowsHookEx(nativeEscapeHook_);
+        nativeEscapeHook_ = nullptr;
+    }
+}
+
+void NekoDragApp::ObserveNativeEscape() {
+    if (!drag_.active || !drag_.nativeStartedMaximized ||
+        drag_.nativeEscapeObserved) {
+        return;
+    }
+    drag_.nativeEscapeObserved = true;
+    if (drag_.nativeCancelRequested != nullptr) {
+        drag_.nativeCancelRequested->store(true,
+                                           std::memory_order_release);
+    }
+    ND_TRACE(L"native Escape observed generation=%llu target=%p "
+             L"started=%d restoreSucceeded=%d",
+             static_cast<unsigned long long>(drag_.generation),
+             drag_.target, drag_.nativeMoveStarted ? 1 : 0,
+             drag_.nativeMaximizedRestoreSucceeded ? 1 : 0);
+    PostMessageW(mainWindow_, kMessageNativeEscapeObserved,
+                 static_cast<WPARAM>(drag_.generation),
+                 reinterpret_cast<LPARAM>(drag_.target));
+}
+
+void NekoDragApp::HandleNativeEscapeObserved(
+    std::uint64_t generation, HWND target) {
+    if (!drag_.active || !IsNativeDrag() ||
+        generation != drag_.generation || target != drag_.target ||
+        !drag_.nativeEscapeObserved) {
+        return;
+    }
+    if (drag_.mode == DragMode::NativeAwaitingMovement) {
+        EndDrag(L"native-maximized-Escape-before-attempt");
+        return;
+    }
+    if (SetTimer(mainWindow_, kNativeCompletionTimer,
+                 kNativeCompletionTimeoutMs, nullptr) == 0) {
+        CancelTargetNativeMove();
+        SuspendNativeMoveWorker();
+        CompleteNativeDrag(L"native-maximized-Escape-timer-failed");
+        if (drag_.engineMode == DragEngineMode::NativeOnly) {
+            RestartNativeMoveWorker();
+        }
+    }
+}
+
 void NekoDragApp::RequestMouseHookInstall(bool resetRetries) {
     if (resetRetries) {
         hookRetryIndex_ = 0;
@@ -1291,15 +1388,12 @@ bool NekoDragApp::BeginDragFromHook(HWND target, HWND initialPressWindow,
     drag_.active = true;
     drag_.beginPending = true;
     drag_.engineMode = settings_.dragEngineMode;
-    drag_.startAction = SelectDragStartAction(
-        drag_.engineMode,
-        nativeMoveAvailable_ && nativeMoveWorker_ != nullptr);
-    drag_.nativePressForwarded =
-        ShouldForwardInitialPress(drag_.startAction);
     drag_.generation = ++dragGenerationCounter_;
     if (drag_.generation == 0) {
         drag_.generation = ++dragGenerationCounter_;
     }
+    drag_.restoring = IsZoomed(target) != FALSE;
+    drag_.nativeStartedMaximized = drag_.restoring;
     drag_.target = target;
     drag_.initialPressWindow = initialPressWindow;
     drag_.startCursor = cursor;
@@ -1316,8 +1410,18 @@ bool NekoDragApp::BeginDragFromHook(HWND target, HWND initialPressWindow,
         static_cast<std::int32_t>(windowRect.right),
         static_cast<std::int32_t>(windowRect.bottom),
     };
-    drag_.restoring = IsZoomed(target) != FALSE;
-
+    drag_.startAction = SelectDragStartAction(
+        drag_.engineMode,
+        nativeMoveAvailable_ && nativeMoveWorker_ != nullptr);
+    if (drag_.startAction == DragStartAction::Native &&
+        drag_.nativeStartedMaximized && !InstallNativeEscapeHook()) {
+        drag_.startAction =
+            drag_.engineMode == DragEngineMode::Automatic
+                ? DragStartAction::Compatibility
+                : DragStartAction::Reject;
+    }
+    drag_.nativePressForwarded =
+        ShouldForwardInitialPress(drag_.startAction);
     if (!PostMessageW(mainWindow_, kMessageBeginDrag, 0, 0)) {
         EndDrag(L"begin-message-post-failed", false);
         return false;
@@ -1538,7 +1642,8 @@ void NekoDragApp::BeginDragOnMessageThread() {
     }
 
     drag_.mode = DragMode::NativeAwaitingMovement;
-    drag_.nativeCancelRequested = std::make_shared<std::atomic_bool>(false);
+    drag_.nativeCancelRequested = std::make_shared<std::atomic_bool>(
+        drag_.nativeEscapeObserved);
     ND_TRACE(L"native move awaiting movement generation=%llu target=%p",
              static_cast<unsigned long long>(drag_.generation),
              drag_.target);
@@ -1584,6 +1689,10 @@ void NekoDragApp::HandleNativeMoveStartRequested(
         return;
     }
     drag_.nativeStartMessagePending = false;
+    if (drag_.nativeEscapeObserved) {
+        EndDrag(L"native-maximized-Escape-before-attempt");
+        return;
+    }
     if (drag_.buttonReleased) {
         if (AllowsCompatibilityFallback(drag_.engineMode)) {
             ND_TRACE(L"automatic-fallback generation=%llu "
@@ -1682,6 +1791,10 @@ bool NekoDragApp::SubmitNativeMoveAttempt(NativeMoveStrategy strategy) {
             ResolveTargetCaptureWindow(drag_.target);
         drag_.nativeInteractionCancelAttempted = true;
     }
+    const bool restoreMaximized =
+        strategy == NativeMoveStrategy::NonClientCaption &&
+        drag_.nativeStartedMaximized &&
+        !drag_.nativeMaximizedRestoreAttempted;
 
     drag_.nativeEventToken = ++nativeEventTokenCounter_;
     if (drag_.nativeEventToken == 0) {
@@ -1697,17 +1810,23 @@ bool NekoDragApp::SubmitNativeMoveAttempt(NativeMoveStrategy strategy) {
         drag_.generation, drag_.target, drag_.latestCursor,
         drag_.nativeCancelRequested, strategy, attempt,
         drag_.initialPressWindow, drag_.nativeCaptureWindow,
-        cancelInitialInteraction};
+        cancelInitialInteraction, restoreMaximized,
+        drag_.maximizedRect};
     if (nativeMoveWorker_->Submit(request)) {
+        if (restoreMaximized) {
+            drag_.nativeMaximizedRestoreRequested = true;
+        }
         ND_TRACE(L"native move requested generation=%llu target=%p "
                  L"strategy=%ls attempt=%lu cursor=(%ld,%ld) "
-                 L"cancelInteraction=%d capture=%p initialPress=%p",
+                 L"cancelInteraction=%d restoreMaximized=%d "
+                 L"capture=%p initialPress=%p",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target, NativeMoveStrategyTraceName(strategy),
                  static_cast<unsigned long>(attempt),
                  static_cast<long>(drag_.latestCursor.x),
                  static_cast<long>(drag_.latestCursor.y),
                  cancelInitialInteraction ? 1 : 0,
+                 restoreMaximized ? 1 : 0,
                  drag_.nativeCaptureWindow,
                  drag_.initialPressWindow);
         return true;
@@ -1735,11 +1854,13 @@ bool NekoDragApp::SubmitNativeMoveAttempt(NativeMoveStrategy strategy) {
     } else {
         FailNativeOnlyDrag(L"native-only-worker-unavailable", ERROR_BUSY,
                            attempt != 0);
+        RestartNativeMoveWorker();
     }
     return false;
 }
 
 void NekoDragApp::BeginManualFallback(bool nativeAttempted) {
+    RemoveNativeEscapeHook();
     if (!drag_.active || !IsWindow(drag_.target)) {
         EndDrag(L"target-invalid-before-manual-fallback");
         return;
@@ -1780,6 +1901,11 @@ void NekoDragApp::BeginManualFallback(bool nativeAttempted) {
     const bool targetMoved =
         currentOrigin.x != drag_.lastAppliedOrigin.x ||
         currentOrigin.y != drag_.lastAppliedOrigin.y;
+    RollbackMaximizedNativeRestoreIfNeeded(true);
+    drag_.nativeStartedMaximized = false;
+    drag_.nativeMaximizedRestoreRequested = false;
+    drag_.nativeMaximizedRestoreAttempted = false;
+    drag_.nativeMaximizedRestoreSucceeded = false;
     if (drag_.nativePressForwarded && drag_.nativeReleaseSuppressed &&
         !drag_.nativeReleaseReplayed) {
         ReplayNativeButtonRelease();
@@ -1859,7 +1985,9 @@ void NekoDragApp::HandleNativeMoveCompleted() {
     ND_TRACE(L"native move returned generation=%llu target=%p "
              L"strategy=%ls attempt=%lu current=%d dispatched=%d "
              L"releaseObserved=%d cancelAttempted=%d "
-             L"cancelSucceeded=%d cancelError=%lu error=%lu "
+             L"cancelSucceeded=%d cancelError=%lu "
+             L"restoreAttempted=%d restoreSucceeded=%d "
+             L"restoreError=%lu restoredOrigin=(%ld,%ld) error=%lu "
              L"elapsedUs=%llu",
              static_cast<unsigned long long>(result.generation),
              result.target, NativeMoveStrategyTraceName(result.strategy),
@@ -1870,10 +1998,43 @@ void NekoDragApp::HandleNativeMoveCompleted() {
              result.interactionCancelAttempted ? 1 : 0,
              result.interactionCancelSucceeded ? 1 : 0,
              static_cast<unsigned long>(result.interactionCancelError),
+             result.maximizedRestoreAttempted ? 1 : 0,
+             result.maximizedRestoreSucceeded ? 1 : 0,
+             static_cast<unsigned long>(result.maximizedRestoreError),
+             static_cast<long>(result.restoredOrigin.x),
+             static_cast<long>(result.restoredOrigin.y),
              static_cast<unsigned long>(result.error),
              static_cast<unsigned long long>(result.elapsedUs));
     if (!currentResult) {
         return;
+    }
+
+    if (result.maximizedRestoreAttempted) {
+        drag_.nativeMaximizedRestoreAttempted = true;
+        drag_.nativeMaximizedRestoreSucceeded =
+            result.maximizedRestoreSucceeded;
+        if (!drag_.nativeMaximizedRestoreSucceeded &&
+            IsWindow(drag_.target) && !IsZoomed(drag_.target)) {
+            drag_.nativeMaximizedRestoreSucceeded = true;
+        }
+        if (drag_.nativeMaximizedRestoreSucceeded) {
+            drag_.nativeMaximizedRollbackRequired =
+                !drag_.nativeMoveStarted;
+            drag_.nativeRestoredOrigin = result.restoredOrigin;
+            RECT actualRect{};
+            if (GetWindowRect(drag_.target, &actualRect)) {
+                drag_.nativeRestoredOrigin = PointFromNative(
+                    POINT{actualRect.left, actualRect.top});
+            }
+            ND_TRACE(L"native maximized window restored generation=%llu "
+                     L"target=%p origin=(%ld,%ld) error=%lu",
+                     static_cast<unsigned long long>(drag_.generation),
+                     drag_.target,
+                     static_cast<long>(drag_.nativeRestoredOrigin.x),
+                     static_cast<long>(drag_.nativeRestoredOrigin.y),
+                     static_cast<unsigned long>(
+                         result.maximizedRestoreError));
+        }
     }
 
     if (result.interactionCancelAttempted) {
@@ -1912,6 +2073,10 @@ void NekoDragApp::HandleNativeMoveCompleted() {
                  drag_.target,
                  NativeMoveStrategyTraceName(drag_.nativeStrategy),
                  static_cast<unsigned long>(drag_.nativeAttempt));
+    }
+    if (drag_.nativeEscapeObserved) {
+        CompleteNativeDrag(L"native-maximized-Escape");
+        return;
     }
     if (!result.dispatched) {
         if (!drag_.nativeMoveStarted && drag_.buttonReleased) {
@@ -1992,6 +2157,16 @@ void NekoDragApp::HandleNativeMoveEvent(bool started,
     }
     if (started) {
         drag_.nativeMoveStarted = true;
+        if (drag_.nativeStartedMaximized) {
+            drag_.nativeMaximizedRestoreAttempted = true;
+            drag_.nativeMaximizedRestoreSucceeded = true;
+            RECT restoredRect{};
+            if (GetWindowRect(drag_.target, &restoredRect)) {
+                drag_.nativeRestoredOrigin = PointFromNative(
+                    POINT{restoredRect.left, restoredRect.top});
+            }
+        }
+        drag_.nativeMaximizedRollbackRequired = false;
         drag_.mode = DragMode::NativeActive;
         KillTimer(mainWindow_, kNativeFallbackTimer);
         ND_TRACE(L"native move started generation=%llu target=%p "
@@ -2000,6 +2175,9 @@ void NekoDragApp::HandleNativeMoveEvent(bool started,
                  NativeMoveStrategyTraceName(drag_.nativeStrategy),
                  static_cast<unsigned long>(drag_.nativeAttempt),
                  static_cast<unsigned long long>(eventToken));
+        if (drag_.nativeEscapeObserved) {
+            CancelTargetNativeMove();
+        }
         if (ShouldReplayNativeButtonRelease(
                 drag_.nativeMoveReturned, drag_.nativeMoveStarted,
                 drag_.buttonReleased, drag_.nativeReleaseSuppressed,
@@ -2030,6 +2208,10 @@ void NekoDragApp::HandleNativeFallbackTimeout() {
     }
     if (drag_.nativeMoveStarted) {
         CompleteNativeDrag(L"native-move-complete-after-grace");
+        return;
+    }
+    if (drag_.nativeEscapeObserved) {
+        CompleteNativeDrag(L"native-maximized-Escape-before-start");
         return;
     }
 
@@ -2106,6 +2288,7 @@ void NekoDragApp::HandleNativeButtonReleased(
         if (drag_.engineMode == DragEngineMode::NativeOnly) {
             FailNativeOnlyDrag(L"native-only-completion-timer-failed",
                                error, true);
+            RestartNativeMoveWorker();
         } else {
             CompleteNativeDrag(L"native-completion-timer-failed");
         }
@@ -2119,7 +2302,6 @@ bool NekoDragApp::ReplayNativeButtonRelease() {
         return false;
     }
 
-    drag_.nativeReleaseReplayed = true;
     INPUT input{};
     input.type = INPUT_MOUSE;
     const PhysicalMouseButton physicalButton = SelectPhysicalPrimaryButton(
@@ -2130,6 +2312,9 @@ bool NekoDragApp::ReplayNativeButtonRelease() {
     input.mi.dwExtraInfo = kNativeReleaseReplayExtraInfo;
     SetLastError(ERROR_SUCCESS);
     if (SendInput(1, &input, static_cast<int>(sizeof(input))) == 1) {
+        // Only mark the release replayed on success so EndDrag can retry a
+        // transiently-failed SendInput instead of giving up permanently.
+        drag_.nativeReleaseReplayed = true;
         ND_TRACE(L"native release replayed generation=%llu target=%p",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target);
@@ -2149,13 +2334,106 @@ bool NekoDragApp::ReplayNativeButtonRelease() {
 }
 
 void NekoDragApp::CancelTargetNativeMove() {
-    if (!drag_.active || !IsNativeMoveAttemptInFlight() ||
+    if (!drag_.active ||
+        !ShouldCancelTargetNativeMove(drag_.nativePressForwarded,
+                                      drag_.nativeAttempt,
+                                      drag_.nativeMoveStarted,
+                                      drag_.nativeMoveEndObserved) ||
         drag_.target == nullptr || !IsWindow(drag_.target)) {
         return;
     }
-    if (!PostMessageW(drag_.target, WM_CANCELMODE, 0, 0)) {
-        ND_TRACE(L"native cancel message failed generation=%llu target=%p "
-                 L"error=%lu",
+    constexpr UINT kNativeCancelTimeoutMs = 500;
+    DWORD_PTR ignored = 0;
+    SetLastError(ERROR_SUCCESS);
+    const LRESULT sent =
+        SendMessageTimeoutW(drag_.target, WM_CANCELMODE, 0, 0,
+                            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+                            kNativeCancelTimeoutMs, &ignored);
+    if (sent == 0) {
+        const DWORD sendError = GetLastError();
+        // Fall back to a non-blocking cancel so a busy loop or a full target
+        // queue still receives at least one WM_CANCELMODE.
+        if (!PostMessageW(drag_.target, WM_CANCELMODE, 0, 0)) {
+            ND_TRACE(L"native cancel failed generation=%llu target=%p "
+                     L"sendError=%lu postError=%lu",
+                     static_cast<unsigned long long>(drag_.generation),
+                     drag_.target,
+                     static_cast<unsigned long>(sendError),
+                     static_cast<unsigned long>(GetLastError()));
+        }
+    }
+}
+
+void NekoDragApp::RestartNativeMoveWorker() {
+    if (shuttingDown_) {
+        return;
+    }
+    // The previous worker may still be blocked inside the target's modal move
+    // loop (SMTO_NOTIMEOUTIFNOTHUNG) and can never service another request.
+    // Recreate it so a future drag can submit again and native-only mode is
+    // not dead for the rest of the process lifetime. The blocked thread is
+    // released by NativeMoveWorker's destructor; if the target still holds the
+    // mouse it stays blocked but is safely detached, so input still recovers.
+    if (nativeMoveWorker_ != nullptr) {
+        nativeMoveWorker_->Stop();
+        nativeMoveWorker_.reset();
+    }
+    if (StartNativeMoveWorker()) {
+        nativeMoveAvailable_ = true;
+        ND_TRACE(L"native move worker restarted");
+    } else {
+        ND_TRACE(L"native move worker restart failed");
+    }
+}
+
+void NekoDragApp::RollbackMaximizedNativeRestoreIfNeeded(
+    bool compatibilityFallbackContinues) {
+    if (drag_.nativeStartedMaximized &&
+        (drag_.nativeMaximizedRestoreRequested ||
+         drag_.nativeMaximizedRestoreAttempted) &&
+        !drag_.nativeMaximizedRestoreSucceeded &&
+        drag_.target != nullptr && IsWindow(drag_.target) &&
+        !IsZoomed(drag_.target)) {
+        drag_.nativeMaximizedRestoreSucceeded = true;
+        drag_.nativeMaximizedRollbackRequired =
+            !drag_.nativeMoveStarted;
+    }
+    const bool rollback = ShouldRollbackMaximizedNativeRestore(
+        drag_.nativeMaximizedRestoreSucceeded,
+        drag_.nativeMoveStarted, drag_.nativeEscapeObserved,
+        compatibilityFallbackContinues);
+    if (drag_.nativeStartedMaximized) {
+        ND_TRACE(L"native maximized rollback decision generation=%llu "
+                 L"requested=%d restored=%d started=%d escape=%d required=%d "
+                 L"compatibilityFallback=%d rollback=%d",
+                 static_cast<unsigned long long>(drag_.generation),
+                 drag_.nativeMaximizedRestoreRequested ? 1 : 0,
+                 drag_.nativeMaximizedRestoreSucceeded ? 1 : 0,
+                 drag_.nativeMoveStarted ? 1 : 0,
+                 drag_.nativeEscapeObserved ? 1 : 0,
+                 drag_.nativeMaximizedRollbackRequired ? 1 : 0,
+                 compatibilityFallbackContinues ? 1 : 0,
+                 rollback ? 1 : 0);
+    }
+    drag_.nativeMaximizedRollbackRequired = false;
+    if (compatibilityFallbackContinues) {
+        drag_.nativeEscapeObserved = false;
+    }
+    if (!rollback || drag_.target == nullptr ||
+        !IsWindow(drag_.target)) {
+        return;
+    }
+    drag_.nativeMaximizedRestoreSucceeded = false;
+    if (ShowWindowAsync(drag_.target, SW_MAXIMIZE)) {
+        ND_TRACE(L"native maximized restore rolled back generation=%llu "
+                 L"target=%p reason=%ls",
+                 static_cast<unsigned long long>(drag_.generation),
+                 drag_.target,
+                 drag_.nativeEscapeObserved ? L"Escape"
+                                            : L"native-not-started");
+    } else {
+        ND_TRACE(L"native maximized rollback failed generation=%llu "
+                 L"target=%p error=%lu",
                  static_cast<unsigned long long>(drag_.generation),
                  drag_.target, static_cast<unsigned long>(GetLastError()));
     }
@@ -2176,14 +2454,14 @@ void NekoDragApp::FailNativeOnlyDrag(const wchar_t* reason, DWORD error,
              static_cast<unsigned long>(error));
     if (!nativeOnlyFailureNotified_) {
         nativeOnlyFailureNotified_ = true;
-        std::wstring message = L"“仅原生（诊断）”模式的原生拖动失败";
+        std::wstring message = L"“原生模式（诊断）”的拖动失败";
         if (error != ERROR_SUCCESS) {
             message.append(L"（错误代码 ");
             message.append(std::to_wstring(error));
             message.append(L"）");
         }
         message.append(
-            L"。请在设置中切换到“自动（实验）”或“兼容（推荐）”。");
+            L"。请在设置中切换到“自动模式（实验）”或“兼容模式（推荐）”。");
         ShowTrayNotification(L"NekoDrag", message.c_str(), NIIF_WARNING);
     }
     if (nativeAttempted) {
@@ -2396,6 +2674,20 @@ void NekoDragApp::EndDrag(const wchar_t* reason, bool trace) {
         !drag_.nativeReleaseReplayed) {
         ReplayNativeButtonRelease();
     }
+    if (drag_.active) {
+        // Release the target's mouse capture whenever we may have driven it
+        // into a native modal move loop, so a stuck loop cannot keep the
+        // system mouse captured (taskbar unreachable / UI unclickable).
+        if (drag_.mode != DragMode::ManualFallback &&
+            ShouldCancelTargetNativeMove(drag_.nativePressForwarded,
+                                         drag_.nativeAttempt,
+                                         drag_.nativeMoveStarted,
+                                         drag_.nativeMoveEndObserved)) {
+            CancelTargetNativeMove();
+        }
+        RollbackMaximizedNativeRestoreIfNeeded(false);
+    }
+    RemoveNativeEscapeHook();
     if (drag_.active && trace) {
         if (drag_.mode == DragMode::ManualFallback) {
             ND_TRACE(L"end manual drag generation=%llu target=%p "
@@ -2637,14 +2929,14 @@ void NekoDragApp::CreateSettingsControls() {
     create(0, L"BUTTON", L"Shi&ft",
            BS_OWNERDRAW | WS_TABSTOP, kControlShift);
     create(0, L"STATIC",
-           L"拖动模式（原生路径为实验功能）",
+           L"拖动模式（原生模式为实验功能）",
            SS_OWNERDRAW | WS_CLIPSIBLINGS, kControlDragModeGroup);
-    create(0, L"BUTTON", L"兼容（推荐）",
+    create(0, L"BUTTON", L"兼容模式（推荐）",
            BS_OWNERDRAW | WS_TABSTOP | WS_GROUP,
            kControlDragModeCompatibility);
-    create(0, L"BUTTON", L"自动（实验）",
+    create(0, L"BUTTON", L"自动模式（实验）",
            BS_OWNERDRAW | WS_TABSTOP, kControlDragModeAutomatic);
-    create(0, L"BUTTON", L"仅原生（诊断）",
+    create(0, L"BUTTON", L"原生模式（诊断）",
            BS_OWNERDRAW | WS_TABSTOP, kControlDragModeNative);
     create(0, L"BUTTON", L"登录 Windows 时自动启动(&U)",
            BS_OWNERDRAW | WS_TABSTOP, kControlStartup);
