@@ -130,6 +130,10 @@ WH_MOUSE_LL
 - 每次手势在开始时快照 `DragEngineMode`：兼容模式（推荐）不提交原生
   请求；自动模式（实验）优先尝试原生并允许兼容回退；原生模式（诊断）
   禁止所有回退。
+- Chromium 自绘窗口（类名 `Chrome_WidgetWin_0/1`，Edge/Chrome/Electron
+  等）会忽略针对客户区的合成原生 caption 移动消息，原生移动循环永不启动；
+  自动模式检测到这类窗口时跳过原生尝试、直接走兼容路由，原生模式保持尝试
+  以作诊断。
 - 原生模式激活目标后进入 `NativeAwaitingMovement`，并让真实主按钮按下进入
   Windows 输入队列；兼容模式仍吞掉按下。首次真实、非注入 `WM_MOUSEMOVE`
   到达后，只有钩子观察状态和 `GetAsyncKeyState` 都仍为按下才提交 attempt 1；

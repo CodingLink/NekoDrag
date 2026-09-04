@@ -118,6 +118,13 @@ DragStartAction SelectDragStartAction(DragEngineMode mode,
                                       bool nativeAvailable) noexcept;
 bool ShouldForwardInitialPress(DragStartAction action) noexcept;
 bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept;
+// Chromium self-drawn windows (Chrome_WidgetWin_*) ignore the synthesized
+// native caption-move messages, so the native move loop never starts on them.
+// Automatic mode should skip the native attempt and route straight to
+// compatibility; native-only mode keeps attempting so it stays a faithful
+// diagnostic.
+bool ShouldSkipNativeMoveForTarget(DragEngineMode mode,
+                                   bool targetRejectsNativeMove) noexcept;
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept;
 bool ShouldMigrateLegacyStartup(bool legacySettingsImported,

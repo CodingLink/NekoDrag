@@ -210,6 +210,20 @@ bool IsExcludedWindowClass(HWND window) {
            _wcsicmp(className, L"#32768") == 0;
 }
 
+bool IsChromiumWindowClass(HWND window) {
+    wchar_t className[128]{};
+    if (GetClassNameW(window, className,
+                      static_cast<int>(std::size(className))) == 0) {
+        return false;
+    }
+    // Chrome_WidgetWin_0/1 are Chromium frame main-window classes (Edge,
+    // Chrome, Brave, Electron apps). They share Chromium's self-drawn frame,
+    // which ignores the synthesized native caption-move messages, so the
+    // native move loop never starts on them.
+    return _wcsicmp(className, L"Chrome_WidgetWin_0") == 0 ||
+           _wcsicmp(className, L"Chrome_WidgetWin_1") == 0;
+}
+
 void SetCheckbox(HWND parent, int controlId, bool checked) {
     HWND control = GetDlgItem(parent, controlId);
     if (control == nullptr) {
@@ -1410,9 +1424,13 @@ bool NekoDragApp::BeginDragFromHook(HWND target, HWND initialPressWindow,
         static_cast<std::int32_t>(windowRect.right),
         static_cast<std::int32_t>(windowRect.bottom),
     };
-    drag_.startAction = SelectDragStartAction(
-        drag_.engineMode,
-        nativeMoveAvailable_ && nativeMoveWorker_ != nullptr);
+    const bool targetRejectsNativeMove = IsChromiumWindowClass(target);
+    const bool nativeAvailable =
+        nativeMoveAvailable_ && nativeMoveWorker_ != nullptr &&
+        !ShouldSkipNativeMoveForTarget(drag_.engineMode,
+                                       targetRejectsNativeMove);
+    drag_.startAction =
+        SelectDragStartAction(drag_.engineMode, nativeAvailable);
     if (drag_.startAction == DragStartAction::Native &&
         drag_.nativeStartedMaximized && !InstallNativeEscapeHook()) {
         drag_.startAction =

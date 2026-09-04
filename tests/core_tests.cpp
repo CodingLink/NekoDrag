@@ -96,6 +96,20 @@ void TestDragEngineRouting() {
            "rejected native routing suppresses the shortcut press");
 }
 
+void TestShouldSkipNativeMoveForTarget() {
+    using namespace nekodrag;
+
+    Expect(ShouldSkipNativeMoveForTarget(DragEngineMode::Automatic, true),
+           "automatic mode skips native for a Chromium target");
+    Expect(!ShouldSkipNativeMoveForTarget(DragEngineMode::Automatic, false),
+           "automatic mode still uses native for ordinary windows");
+    Expect(!ShouldSkipNativeMoveForTarget(DragEngineMode::NativeOnly, true),
+           "native-only mode keeps attempting native for diagnosis");
+    Expect(!ShouldSkipNativeMoveForTarget(DragEngineMode::CompatibilityOnly,
+                                          true),
+           "compatibility mode never starts a native attempt anyway");
+}
+
 void TestPositionCalculations() {
     using namespace nekodrag;
     const Point dragged = ComputeDraggedOrigin({250, 180}, {50, 30});
@@ -373,6 +387,7 @@ void TestNativeMoveEventTimeMatching() {
 int main() {
     TestModifierValidation();
     TestDragEngineRouting();
+    TestShouldSkipNativeMoveForTarget();
     TestPositionCalculations();
     TestLegacyStartupCommandOwnership();
     TestWindowFiltering();

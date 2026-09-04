@@ -78,6 +78,11 @@ bool AllowsCompatibilityFallback(DragEngineMode mode) noexcept {
     return mode == DragEngineMode::Automatic;
 }
 
+bool ShouldSkipNativeMoveForTarget(DragEngineMode mode,
+                                   bool targetRejectsNativeMove) noexcept {
+    return mode == DragEngineMode::Automatic && targetRejectsNativeMove;
+}
+
 bool IsExactModifierMatch(std::uint32_t configured,
                           std::uint32_t currentlyDown) noexcept {
     return IsValidModifierMask(configured) && configured == currentlyDown;
