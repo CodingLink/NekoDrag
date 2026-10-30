@@ -29,6 +29,21 @@ jobs:
           -DBUILD_TESTING=ON
           -DNEKODRAG_TRACE=OFF
 
+      - name: Verify tag matches version
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          $header = Get-Content build/generated/nekodrag_version.h -Raw
+          if ($header -notmatch '#define NEKODRAG_VERSION_STRING "([^"]+)"') {
+              throw "NEKODRAG_VERSION_STRING not found in generated header"
+          }
+          $version = $Matches[1]
+          if ($env:REF_NAME -ne "v$version") {
+              throw "Tag $env:REF_NAME does not match NEKODRAG_VERSION $version in CMakeLists.txt"
+          }
+
       - name: Build
         run: cmake --build build --config Release --parallel
 

@@ -297,7 +297,12 @@ HKCU\Software\Microsoft\Windows\CurrentVersion\Run
 - `scripts/generate_icons.py` 使用 Pillow/Lanczos 生成 16/20/24/32/48/256px
   应用图标及 16/20/24px 托盘图标。Pillow 只用于开发期资源生成，必须安装在
   项目虚拟环境中；应用构建和运行不依赖 Pillow。
-- Manifest 已作为 CMake 源文件交给 MSVC。
+- 版本号唯一来源是 `CMakeLists.txt` 中的 `NEKODRAG_VERSION`。配置时生成
+  `build/generated/nekodrag_version.h`（供 `.rc` 版本资源使用）和
+  `build/generated/nekodrag.manifest`；不要在 `.rc` 或 manifest 模板中手写版本号。
+- 发布流程：先把 `NEKODRAG_VERSION` 改为新版本并提交，再打 `v<版本>` tag；
+  CI 在 tag 与 `NEKODRAG_VERSION` 不一致时会在构建前失败。
+- Manifest 模板 `src/nekodrag.manifest.in` 经 CMake 生成后作为源文件交给 MSVC。
 - 不要再向 `.rc` 添加 `RT_MANIFEST`，否则会再次出现：
 
 ```text

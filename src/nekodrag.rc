@@ -1,17 +1,24 @@
 #include <windows.h>
 #include "resource.h"
+#include "nekodrag_version.h"
+
+#if NEKODRAG_VERSION_PRERELEASE
+#define NEKODRAG_FF_PRERELEASE VS_FF_PRERELEASE
+#else
+#define NEKODRAG_FF_PRERELEASE 0
+#endif
 
 IDI_APPICON ICON "assets/app.ico"
 IDI_TRAYICON ICON "assets/tray.ico"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION NEKODRAG_VERSION_MAJOR,NEKODRAG_VERSION_MINOR,NEKODRAG_VERSION_PATCH,0
+ PRODUCTVERSION NEKODRAG_VERSION_MAJOR,NEKODRAG_VERSION_MINOR,NEKODRAG_VERSION_PATCH,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
- FILEFLAGS VS_FF_DEBUG | VS_FF_PRERELEASE
+ FILEFLAGS VS_FF_DEBUG | NEKODRAG_FF_PRERELEASE
 #else
- FILEFLAGS VS_FF_PRERELEASE
+ FILEFLAGS NEKODRAG_FF_PRERELEASE
 #endif
  FILEOS VOS_NT_WINDOWS32
  FILETYPE VFT_APP
@@ -23,11 +30,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "NekoDrag"
             VALUE "FileDescription", "NekoDrag Window Utility"
-            VALUE "FileVersion", "0.1.0-beta.4"
+            VALUE "FileVersion", NEKODRAG_VERSION_STRING
             VALUE "InternalName", "NekoDrag"
             VALUE "OriginalFilename", "NekoDrag.exe"
             VALUE "ProductName", "NekoDrag"
-            VALUE "ProductVersion", "0.1.0-beta.4"
+            VALUE "ProductVersion", NEKODRAG_VERSION_STRING
         END
     END
     BLOCK "VarFileInfo"

@@ -1,6 +1,24 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(NekoDrag VERSION 0.1.0 LANGUAGES CXX)
+# Single source of truth for the release version. The EXE version resource,
+# manifest and CI tag check are all derived from this value; bump it before
+# tagging v<NEKODRAG_VERSION>.
+set(NEKODRAG_VERSION "0.1.0-beta.6")
+if(NOT NEKODRAG_VERSION MATCHES
+   "^([0-9]+\\.[0-9]+\\.[0-9]+)(-(alpha|beta|rc)\\.[0-9]+)?$")
+    message(FATAL_ERROR
+        "NEKODRAG_VERSION must look like 1.2.3 or 1.2.3-beta.4, "
+        "got '${NEKODRAG_VERSION}'"
+    )
+endif()
+set(_nekodrag_numeric_version "${CMAKE_MATCH_1}")
+if(CMAKE_MATCH_2)
+    set(NEKODRAG_VERSION_PRERELEASE 1)
+else()
+    set(NEKODRAG_VERSION_PRERELEASE 0)
+endif()
+
+project(NekoDrag VERSION ${_nekodrag_numeric_version} LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -66,15 +84,26 @@ if(WIN32)
         MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
     )
 
+    set(NEKODRAG_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
+    configure_file(src/nekodrag_version.h.in
+        "${NEKODRAG_GENERATED_DIR}/nekodrag_version.h" @ONLY
+    )
+    configure_file(src/nekodrag.manifest.in
+        "${NEKODRAG_GENERATED_DIR}/nekodrag.manifest" @ONLY
+    )
+
     add_executable(NekoDrag WIN32
         src/main.cpp
         src/app.cpp
         src/settings_store.cpp
         src/ui_theme.cpp
         src/nekodrag.rc
-        src/nekodrag.manifest
+        "${NEKODRAG_GENERATED_DIR}/nekodrag.manifest"
     )
-    target_include_directories(NekoDrag PRIVATE src)
+    target_include_directories(NekoDrag PRIVATE
+        src
+        "${NEKODRAG_GENERATED_DIR}"
+    )
     target_compile_definitions(NekoDrag PRIVATE
         UNICODE
         _UNICODE
