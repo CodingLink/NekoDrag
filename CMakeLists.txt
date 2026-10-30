@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.20)
 # Single source of truth for the release version. The EXE version resource,
 # manifest and CI tag check are all derived from this value; bump it before
 # tagging v<NEKODRAG_VERSION>.
-set(NEKODRAG_VERSION "0.1.0-beta.6")
+set(NEKODRAG_VERSION "0.1.0-beta.7")
 if(NOT NEKODRAG_VERSION MATCHES
    "^([0-9]+\\.[0-9]+\\.[0-9]+)(-(alpha|beta|rc)\\.[0-9]+)?$")
     message(FATAL_ERROR
