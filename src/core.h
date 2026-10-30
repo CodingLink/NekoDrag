@@ -64,6 +64,27 @@ struct WindowTraits {
     bool transientSurface = false;
 };
 
+// Compatibility-mode edge snapping targets, mirroring Windows Snap layouts.
+enum class SnapZone {
+    None,
+    Maximize,
+    LeftHalf,
+    RightHalf,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+};
+
+// Monitor edges with no adjacent monitor; the cursor can only rest against
+// these, so only they act as snap triggers.
+struct SnapEdges {
+    bool left = false;
+    bool top = false;
+    bool right = false;
+    bool bottom = false;
+};
+
 enum class NativeMoveCompletionAction {
     Complete,
     WaitForStartEvent,
@@ -133,6 +154,20 @@ Point ComputeDraggedOrigin(Point cursor, Point grabOffset) noexcept;
 Point ComputeRestoredOrigin(Point cursor, Rect maximizedRect,
                             Size restoredSize) noexcept;
 bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept;
+bool RectsEqual(Rect a, Rect b) noexcept;
+// Returns the zone for a cursor inside monitorRect. Edges trigger within
+// edgeThreshold pixels; corners cover the outer 1/kSnapCornerDivisor of the
+// monitor's shorter side along each edge.
+constexpr std::int32_t kSnapCornerDivisor = 16;
+SnapZone DetectSnapZone(Point cursor, Rect monitorRect, SnapEdges openEdges,
+                        std::int32_t edgeThreshold) noexcept;
+// Visible-frame rectangle for a zone inside the monitor work area.
+Rect ComputeSnapRect(SnapZone zone, Rect workArea) noexcept;
+// Converts a desired visible-frame rectangle into a GetWindowRect-space
+// rectangle by adding the invisible resize borders (windowRect minus the
+// DWM extended frame bounds).
+Rect ExpandByFrameMargins(Rect visibleTarget, Rect windowRect,
+                          Rect visibleFrame) noexcept;
 NativeMoveCompletionAction DecideNativeMoveCompletion(
     bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept;

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace nekodrag {
 
@@ -69,6 +70,13 @@ class NekoDragApp {
         bool nativeMaximizedRestoreSucceeded = false;
         bool nativeMaximizedRollbackRequired = false;
         bool nativeEscapeObserved = false;
+        bool dragThresholdExceeded = false;
+        bool snapEnabled = false;
+        bool snapResizable = false;
+        bool snapMaximizable = false;
+        bool snapPreviewVisible = false;
+        bool unsnapPending = false;
+        bool unsnapApplied = false;
         unsigned restoreAttempts = 0;
         std::uint32_t nativeAttempt = 0;
         std::uint64_t generation = 0;
@@ -93,7 +101,18 @@ class NekoDragApp {
         Point finalRequestedOrigin{};
         Point nativeRestoredOrigin{};
         Rect maximizedRect{};
+        Rect snapPreviewRect{};
+        Rect snappedRect{};
+        Size unsnapSize{};
         std::shared_ptr<std::atomic_bool> nativeCancelRequested;
+    };
+
+    // Pre-snap size of a window NekoDrag snapped in compatibility mode, so the
+    // next drag can restore it while the window still has the snapped rect.
+    struct SnapRecord {
+        HWND window = nullptr;
+        Rect snappedRect{};
+        Size restoreSize{};
     };
 
     static LRESULT CALLBACK MainWindowProc(HWND window, UINT message,
@@ -177,6 +196,15 @@ class NekoDragApp {
     void HandleMoveCompleted();
     void ScheduleDragUpdate();
     void ApplyLatestDragPosition();
+    void PrepareCompatibilitySnap(const RECT& currentRect);
+    void RestoreSnappedWindowSize();
+    void UpdateSnapPreview();
+    void HideSnapPreview();
+    bool EnsureSnapPreviewWindow();
+    bool ApplySnapOnRelease();
+    void RememberSnap(HWND window, Rect snappedRect, Size restoreSize);
+    void ForgetSnap(HWND window);
+    void FinishManualDrag(const wchar_t* reason);
     void EndDrag(const wchar_t* reason, bool trace = true);
     void FailCurrentDrag(bool showPrivilegeHint,
                          DWORD error = ERROR_SUCCESS);
@@ -208,6 +236,7 @@ class NekoDragApp {
     HANDLE legacyInstanceMutex_ = nullptr;
     HWND mainWindow_ = nullptr;
     HWND settingsWindow_ = nullptr;
+    HWND snapPreviewWindow_ = nullptr;
     HHOOK mouseHook_ = nullptr;
     HHOOK nativeEscapeHook_ = nullptr;
     HFONT settingsFont_ = nullptr;
@@ -231,6 +260,7 @@ class NekoDragApp {
     bool settingsStatusError_ = false;
     bool nativeOnlyFailureNotified_ = false;
     DragState drag_{};
+    std::vector<SnapRecord> snapRecords_;
     std::uint64_t dragGenerationCounter_ = 0;
     std::uint64_t nativeEventTokenCounter_ = 0;
     bool trayIconAdded_ = false;

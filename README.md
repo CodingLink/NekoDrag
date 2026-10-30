@@ -48,7 +48,7 @@ NekoDrag 是一个原生 C++17/Win32 实现的 Windows 10/11 x64 托盘程序。
 - 自动/仅原生模式会放行真实鼠标按下以建立 Windows 按键状态，并在首次移动时用 `WM_CANCELMODE` 尽力取消控件交互；控件仍可能发生焦点或选择变化
 - 最大化窗口会在原生派发前按鼠标相对位置恢复；正常完成保持恢复状态，Esc 或仅原生启动失败会重新最大化
 - 成功进入原生移动循环时，Snap 贴靠、跨屏 DPI 和 Esc 取消由 Windows 处理；不保证所有第三方窗口都支持该路径
-- 兼容模式使用 `SetWindowPos` 跟随鼠标，不提供系统 Snap、跨屏 DPI 重算或 Esc 回滚语义
+- 兼容模式使用 `SetWindowPos` 跟随鼠标，并提供简易边缘贴靠：拖到屏幕左/右边缘贴半屏、四角贴四分之一屏、顶部边缘最大化，拖动时显示半透明预览；再次拖动已贴靠窗口会恢复原尺寸。贴靠跟随 Windows「贴靠窗口」开关；兼容模式不提供跨屏 DPI 重算或 Esc 回滚语义
 - 实现细节见 [技术概述](docs/TECHNICAL_OVERVIEW.md)
 
 **轻量便携**
@@ -140,7 +140,7 @@ NekoDrag is a lightweight Windows 10/11 x64 tray utility written in native C++17
 - Auto/native-only forwards the real mouse press to establish Windows button state, then uses best-effort `WM_CANCELMODE` cleanup on first movement; controls may still change focus or selection
 - Maximized windows are restored around the pointer before native dispatch; normal completion keeps them restored, while Esc or native-only startup failure maximizes them again
 - When the native move loop starts successfully, Windows handles Snap, multi-monitor DPI, and Esc cancellation; this path is not supported by every third-party window
-- Compatibility mode follows the pointer with `SetWindowPos`; it does not provide system Snap, cross-monitor DPI recalculation, or Esc rollback semantics
+- Compatibility mode follows the pointer with `SetWindowPos` and adds simple edge snapping: left/right screen edges snap to halves, corners to quarters, and the top edge maximizes, with a translucent preview while dragging; dragging a snapped window again restores its previous size. Snapping follows the Windows "Snap windows" setting; compatibility mode does not provide cross-monitor DPI recalculation or Esc rollback semantics
 - See the [technical overview](docs/TECHNICAL_OVERVIEW.md) for implementation details
 
 **Lightweight and portable**

@@ -167,6 +167,103 @@ bool IsMovableWindowCandidate(const WindowTraits& traits) noexcept {
            !traits.transientSurface;
 }
 
+bool RectsEqual(Rect a, Rect b) noexcept {
+    return a.left == b.left && a.top == b.top && a.right == b.right &&
+           a.bottom == b.bottom;
+}
+
+SnapZone DetectSnapZone(Point cursor, Rect monitorRect, SnapEdges openEdges,
+                        std::int32_t edgeThreshold) noexcept {
+    if (cursor.x < monitorRect.left || cursor.x >= monitorRect.right ||
+        cursor.y < monitorRect.top || cursor.y >= monitorRect.bottom) {
+        return SnapZone::None;
+    }
+    const std::int64_t width =
+        static_cast<std::int64_t>(monitorRect.right) - monitorRect.left;
+    const std::int64_t height =
+        static_cast<std::int64_t>(monitorRect.bottom) - monitorRect.top;
+    const std::int64_t threshold = std::max<std::int32_t>(edgeThreshold, 1);
+    const std::int64_t cornerExtent = std::max<std::int64_t>(
+        std::min(width, height) / kSnapCornerDivisor, threshold);
+
+    const std::int64_t fromLeft =
+        static_cast<std::int64_t>(cursor.x) - monitorRect.left;
+    const std::int64_t fromRight =
+        static_cast<std::int64_t>(monitorRect.right) - 1 - cursor.x;
+    const std::int64_t fromTop =
+        static_cast<std::int64_t>(cursor.y) - monitorRect.top;
+    const std::int64_t fromBottom =
+        static_cast<std::int64_t>(monitorRect.bottom) - 1 - cursor.y;
+
+    const bool nearTop = fromTop < cornerExtent;
+    const bool nearBottom = fromBottom < cornerExtent;
+    if (openEdges.left && fromLeft < threshold) {
+        return nearTop      ? SnapZone::TopLeft
+               : nearBottom ? SnapZone::BottomLeft
+                            : SnapZone::LeftHalf;
+    }
+    if (openEdges.right && fromRight < threshold) {
+        return nearTop      ? SnapZone::TopRight
+               : nearBottom ? SnapZone::BottomRight
+                            : SnapZone::RightHalf;
+    }
+    const bool nearLeft = fromLeft < cornerExtent;
+    const bool nearRight = fromRight < cornerExtent;
+    if (openEdges.top && fromTop < threshold) {
+        return nearLeft    ? SnapZone::TopLeft
+               : nearRight ? SnapZone::TopRight
+                           : SnapZone::Maximize;
+    }
+    if (openEdges.bottom && fromBottom < threshold) {
+        return nearLeft    ? SnapZone::BottomLeft
+               : nearRight ? SnapZone::BottomRight
+                           : SnapZone::None;
+    }
+    return SnapZone::None;
+}
+
+Rect ComputeSnapRect(SnapZone zone, Rect workArea) noexcept {
+    const auto midX = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(workArea.left) + workArea.right) / 2);
+    const auto midY = static_cast<std::int32_t>(
+        (static_cast<std::int64_t>(workArea.top) + workArea.bottom) / 2);
+    switch (zone) {
+        case SnapZone::None:
+        case SnapZone::Maximize:
+            return workArea;
+        case SnapZone::LeftHalf:
+            return {workArea.left, workArea.top, midX, workArea.bottom};
+        case SnapZone::RightHalf:
+            return {midX, workArea.top, workArea.right, workArea.bottom};
+        case SnapZone::TopLeft:
+            return {workArea.left, workArea.top, midX, midY};
+        case SnapZone::TopRight:
+            return {midX, workArea.top, workArea.right, midY};
+        case SnapZone::BottomLeft:
+            return {workArea.left, midY, midX, workArea.bottom};
+        case SnapZone::BottomRight:
+            return {midX, midY, workArea.right, workArea.bottom};
+    }
+    return workArea;
+}
+
+Rect ExpandByFrameMargins(Rect visibleTarget, Rect windowRect,
+                          Rect visibleFrame) noexcept {
+    const auto margin = [](std::int32_t outer, std::int32_t inner) {
+        return std::max<std::int64_t>(
+            static_cast<std::int64_t>(inner) - outer, 0);
+    };
+    const std::int64_t left = margin(windowRect.left, visibleFrame.left);
+    const std::int64_t top = margin(windowRect.top, visibleFrame.top);
+    const std::int64_t right = margin(visibleFrame.right, windowRect.right);
+    const std::int64_t bottom =
+        margin(visibleFrame.bottom, windowRect.bottom);
+    return {SaturatingSubtract(visibleTarget.left, left),
+            SaturatingSubtract(visibleTarget.top, top),
+            SaturatingSubtract(visibleTarget.right, -right),
+            SaturatingSubtract(visibleTarget.bottom, -bottom)};
+}
+
 NativeMoveCompletionAction DecideNativeMoveCompletion(
     bool moveSizeStarted, bool buttonReleaseObserved,
     bool startGraceExpired) noexcept {

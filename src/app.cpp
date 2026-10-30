@@ -13,6 +13,7 @@
 #include <array>
 #include <cstdarg>
 #include <cstdint>
+#include <cstdlib>
 #include <cwchar>
 #include <iterator>
 #include <string>
@@ -24,6 +25,7 @@ namespace {
 constexpr wchar_t kMainWindowClass[] = L"NekoDrag.HiddenWindow";
 constexpr wchar_t kMainWindowTitle[] = L"NekoDrag.MessageWindow";
 constexpr wchar_t kSettingsWindowClass[] = L"NekoDrag.SettingsWindow";
+constexpr wchar_t kSnapPreviewWindowClass[] = L"NekoDrag.SnapPreview";
 constexpr wchar_t kInstanceMutex[] = L"Local\\NekoDrag.SingleInstance";
 
 // Legacy identifiers are retained only to prevent duplicate hooks during an
@@ -58,6 +60,9 @@ constexpr ULONG_PTR kNativeReleaseReplayExtraInfo =
     static_cast<ULONG_PTR>(0x4E4B4452UL);  // "NKDR"
 constexpr std::array<UINT, 3> kHookRetryDelaysMs{250, 1000, 3000};
 constexpr unsigned kMaxRestoreAttempts = 30;
+constexpr std::int32_t kSnapEdgeThresholdPx = 2;
+constexpr BYTE kSnapPreviewAlpha = 80;
+constexpr std::size_t kMaxSnapRecords = 32;
 
 constexpr UINT kTrayIconId = 1;
 constexpr UINT kMenuToggleEnabled = 2001;
@@ -143,6 +148,57 @@ bool IsKeyDown(int virtualKey) noexcept {
 Point PointFromNative(POINT point) noexcept {
     return {static_cast<std::int32_t>(point.x),
             static_cast<std::int32_t>(point.y)};
+}
+
+Rect RectFromNative(const RECT& rect) noexcept {
+    return {static_cast<std::int32_t>(rect.left),
+            static_cast<std::int32_t>(rect.top),
+            static_cast<std::int32_t>(rect.right),
+            static_cast<std::int32_t>(rect.bottom)};
+}
+
+bool HasExceededDragThreshold(Point start, Point current) noexcept {
+    const int dx = std::abs(current.x - start.x);
+    const int dy = std::abs(current.y - start.y);
+    return dx >= GetSystemMetrics(SM_CXDRAG) ||
+           dy >= GetSystemMetrics(SM_CYDRAG);
+}
+
+bool IsScreenEdgeOpen(POINT justOutside) noexcept {
+    return MonitorFromPoint(justOutside, MONITOR_DEFAULTTONULL) == nullptr;
+}
+
+// Resolves the snap zone under the cursor, honoring the same window
+// capabilities Windows Snap requires: resizable frames for halves/quarters
+// and a maximize box for the top edge.
+bool ResolveSnapTarget(Point cursor, bool resizable, bool maximizable,
+                       SnapZone* zone, Rect* workArea) {
+    const POINT point{cursor.x, cursor.y};
+    HMONITOR monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONULL);
+    if (monitor == nullptr) {
+        return false;
+    }
+    MONITORINFO monitorInfo{};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (!GetMonitorInfoW(monitor, &monitorInfo)) {
+        return false;
+    }
+    const RECT& bounds = monitorInfo.rcMonitor;
+    const SnapEdges openEdges{
+        IsScreenEdgeOpen(POINT{bounds.left - 1, point.y}),
+        IsScreenEdgeOpen(POINT{point.x, bounds.top - 1}),
+        IsScreenEdgeOpen(POINT{bounds.right, point.y}),
+        IsScreenEdgeOpen(POINT{point.x, bounds.bottom}),
+    };
+    const SnapZone detected = DetectSnapZone(
+        cursor, RectFromNative(bounds), openEdges, kSnapEdgeThresholdPx);
+    if (detected == SnapZone::None ||
+        !(detected == SnapZone::Maximize ? maximizable : resizable)) {
+        return false;
+    }
+    *zone = detected;
+    *workArea = RectFromNative(monitorInfo.rcWork);
+    return true;
 }
 
 bool QueryProcessIntegrity(HANDLE process, DWORD* integrityLevel) {
@@ -529,6 +585,17 @@ bool NekoDragApp::RegisterWindowClasses(std::wstring* error) {
         *error = ErrorWithCode(L"注册设置窗口失败", GetLastError());
         return false;
     }
+
+    WNDCLASSEXW snapPreviewClass{};
+    snapPreviewClass.cbSize = sizeof(snapPreviewClass);
+    snapPreviewClass.lpfnWndProc = DefWindowProcW;
+    snapPreviewClass.hInstance = instance_;
+    snapPreviewClass.hbrBackground = GetSysColorBrush(COLOR_HIGHLIGHT);
+    snapPreviewClass.lpszClassName = kSnapPreviewWindowClass;
+    if (RegisterClassExW(&snapPreviewClass) == 0) {
+        *error = ErrorWithCode(L"注册贴靠预览窗口失败", GetLastError());
+        return false;
+    }
     return true;
 }
 
@@ -652,6 +719,10 @@ void NekoDragApp::Shutdown() {
         DestroyWindow(settingsWindow_);
         settingsWindow_ = nullptr;
     }
+    if (snapPreviewWindow_ != nullptr && IsWindow(snapPreviewWindow_)) {
+        DestroyWindow(snapPreviewWindow_);
+    }
+    snapPreviewWindow_ = nullptr;
     if (settingsFont_ != nullptr) {
         DeleteObject(settingsFont_);
         settingsFont_ = nullptr;
@@ -1962,6 +2033,7 @@ void NekoDragApp::BeginManualFallback(bool nativeAttempted) {
             return;
         }
     }
+    PrepareCompatibilitySnap(currentRect);
     if (nativeAttempted) {
         ND_TRACE(L"automatic-fallback generation=%llu "
                  L"reason=native-move-ignored "
@@ -2533,7 +2605,7 @@ bool NekoDragApp::SubmitLatestDragPosition(bool finalRequest) {
         if (matchesLastApplied &&
             (!drag_.moveRequested || matchesLastRequested)) {
             ND_TRACE(L"end drag: final position already applied");
-            EndDrag(L"final-already-applied");
+            FinishManualDrag(L"final-already-applied");
             return true;
         }
         drag_.finalMoveRequested = true;
@@ -2622,7 +2694,7 @@ void NekoDragApp::HandleMoveCompleted() {
                                   : result.requestedOrigin;
     if (completesFinalMove) {
         KillTimer(mainWindow_, kDragReleaseTimer);
-        EndDrag(L"final-move-complete");
+        FinishManualDrag(L"final-move-complete");
     }
 }
 
@@ -2677,11 +2749,216 @@ void NekoDragApp::ApplyLatestDragPosition() {
                  static_cast<long>(restoredOrigin.y));
     }
 
+    if (!drag_.dragThresholdExceeded) {
+        drag_.dragThresholdExceeded =
+            HasExceededDragThreshold(drag_.startCursor, drag_.latestCursor);
+    }
+    if (drag_.unsnapPending && drag_.dragThresholdExceeded) {
+        RestoreSnappedWindowSize();
+    }
+    UpdateSnapPreview();
+
     if (drag_.releasePending) {
         SubmitLatestDragPosition(true);
     } else {
         SubmitLatestDragPosition(false);
     }
+}
+
+void NekoDragApp::PrepareCompatibilitySnap(const RECT& currentRect) {
+    BOOL arrangingEnabled = FALSE;
+    drag_.snapEnabled =
+        SystemParametersInfoW(SPI_GETWINARRANGING, 0, &arrangingEnabled,
+                              0) != FALSE &&
+        arrangingEnabled != FALSE;
+    const LONG_PTR style = GetWindowLongPtrW(drag_.target, GWL_STYLE);
+    drag_.snapResizable = (style & WS_THICKFRAME) != 0;
+    drag_.snapMaximizable = (style & WS_MAXIMIZEBOX) != 0;
+    if (!drag_.snapEnabled || drag_.restoring) {
+        return;
+    }
+    const Rect current = RectFromNative(currentRect);
+    for (const SnapRecord& record : snapRecords_) {
+        if (record.window == drag_.target &&
+            RectsEqual(record.snappedRect, current)) {
+            drag_.unsnapPending = true;
+            drag_.snappedRect = record.snappedRect;
+            drag_.unsnapSize = record.restoreSize;
+            return;
+        }
+    }
+}
+
+void NekoDragApp::RestoreSnappedWindowSize() {
+    drag_.unsnapPending = false;
+    // Size only: the move worker owns the origin, so an asynchronous resize
+    // cannot reorder against its SetWindowPos calls.
+    if (!SetWindowPos(drag_.target, nullptr, 0, 0, drag_.unsnapSize.width,
+                      drag_.unsnapSize.height,
+                      SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE |
+                          SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS)) {
+        ND_TRACE(L"unsnap resize failed error=%lu",
+                 static_cast<unsigned long>(GetLastError()));
+        return;
+    }
+    const Point restoredOrigin = ComputeRestoredOrigin(
+        drag_.startCursor, drag_.snappedRect, drag_.unsnapSize);
+    drag_.grabOffset = {drag_.startCursor.x - restoredOrigin.x,
+                        drag_.startCursor.y - restoredOrigin.y};
+    drag_.unsnapApplied = true;
+    ForgetSnap(drag_.target);
+    ND_TRACE(L"unsnap generation=%llu size=(%ld,%ld)",
+             static_cast<unsigned long long>(drag_.generation),
+             static_cast<long>(drag_.unsnapSize.width),
+             static_cast<long>(drag_.unsnapSize.height));
+}
+
+void NekoDragApp::UpdateSnapPreview() {
+    SnapZone zone = SnapZone::None;
+    Rect workArea{};
+    if (!drag_.snapEnabled || !drag_.dragThresholdExceeded ||
+        !ResolveSnapTarget(drag_.latestCursor, drag_.snapResizable,
+                           drag_.snapMaximizable, &zone, &workArea)) {
+        HideSnapPreview();
+        return;
+    }
+    const Rect preview = ComputeSnapRect(zone, workArea);
+    if (drag_.snapPreviewVisible &&
+        RectsEqual(preview, drag_.snapPreviewRect)) {
+        return;
+    }
+    if (!EnsureSnapPreviewWindow()) {
+        return;
+    }
+    // Insert directly below the dragged window, as the system preview does.
+    if (!SetWindowPos(snapPreviewWindow_, drag_.target, preview.left,
+                      preview.top, preview.right - preview.left,
+                      preview.bottom - preview.top,
+                      SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
+        return;
+    }
+    drag_.snapPreviewVisible = true;
+    drag_.snapPreviewRect = preview;
+}
+
+void NekoDragApp::HideSnapPreview() {
+    if (drag_.snapPreviewVisible && snapPreviewWindow_ != nullptr) {
+        ShowWindow(snapPreviewWindow_, SW_HIDE);
+    }
+    drag_.snapPreviewVisible = false;
+    drag_.snapPreviewRect = {};
+}
+
+bool NekoDragApp::EnsureSnapPreviewWindow() {
+    if (snapPreviewWindow_ != nullptr) {
+        return true;
+    }
+    // Layered + transparent keeps the preview out of hit testing, so it can
+    // never become a drag target or swallow the release.
+    snapPreviewWindow_ = CreateWindowExW(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW |
+            WS_EX_NOACTIVATE,
+        kSnapPreviewWindowClass, L"", WS_POPUP, 0, 0, 0, 0, nullptr, nullptr,
+        instance_, nullptr);
+    if (snapPreviewWindow_ == nullptr) {
+        ND_TRACE(L"snap preview window creation failed error=%lu",
+                 static_cast<unsigned long>(GetLastError()));
+        return false;
+    }
+    SetLayeredWindowAttributes(snapPreviewWindow_, 0, kSnapPreviewAlpha,
+                               LWA_ALPHA);
+    return true;
+}
+
+bool NekoDragApp::ApplySnapOnRelease() {
+    SnapZone zone = SnapZone::None;
+    Rect workArea{};
+    if (!drag_.snapEnabled || !drag_.dragThresholdExceeded ||
+        !IsWindow(drag_.target) ||
+        !ResolveSnapTarget(drag_.latestCursor, drag_.snapResizable,
+                           drag_.snapMaximizable, &zone, &workArea)) {
+        return false;
+    }
+    if (zone == SnapZone::Maximize) {
+        // The final move left the window on the cursor's monitor, so the
+        // system maximizes it there and keeps the drop rect for restore.
+        const bool maximized =
+            ShowWindowAsync(drag_.target, SW_MAXIMIZE) != FALSE;
+        ND_TRACE(L"snap generation=%llu zone=maximize ok=%d",
+                 static_cast<unsigned long long>(drag_.generation),
+                 maximized ? 1 : 0);
+        return maximized;
+    }
+
+    RECT windowRect{};
+    if (!GetWindowRect(drag_.target, &windowRect)) {
+        return false;
+    }
+    Rect visibleFrame = RectFromNative(windowRect);
+    RECT frameBounds{};
+    if (SUCCEEDED(DwmGetWindowAttribute(drag_.target,
+                                        DWMWA_EXTENDED_FRAME_BOUNDS,
+                                        &frameBounds, sizeof(frameBounds)))) {
+        visibleFrame = RectFromNative(frameBounds);
+    }
+    const Rect target =
+        ExpandByFrameMargins(ComputeSnapRect(zone, workArea),
+                             RectFromNative(windowRect), visibleFrame);
+    const Size restoreSize =
+        drag_.unsnapApplied
+            ? drag_.unsnapSize
+            : Size{static_cast<std::int32_t>(windowRect.right -
+                                             windowRect.left),
+                   static_cast<std::int32_t>(windowRect.bottom -
+                                             windowRect.top)};
+    // One-shot placement after the worker finished; asynchronous so a busy
+    // target cannot block the hook thread.
+    if (!SetWindowPos(drag_.target, nullptr, target.left, target.top,
+                      target.right - target.left, target.bottom - target.top,
+                      SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOOWNERZORDER |
+                          SWP_ASYNCWINDOWPOS)) {
+        ND_TRACE(L"snap placement failed error=%lu",
+                 static_cast<unsigned long>(GetLastError()));
+        return false;
+    }
+    RememberSnap(drag_.target, target, restoreSize);
+    ND_TRACE(L"snap generation=%llu zone=%d rect=(%ld,%ld,%ld,%ld)",
+             static_cast<unsigned long long>(drag_.generation),
+             static_cast<int>(zone), static_cast<long>(target.left),
+             static_cast<long>(target.top), static_cast<long>(target.right),
+             static_cast<long>(target.bottom));
+    return true;
+}
+
+void NekoDragApp::RememberSnap(HWND window, Rect snappedRect,
+                               Size restoreSize) {
+    snapRecords_.erase(
+        std::remove_if(snapRecords_.begin(), snapRecords_.end(),
+                       [window](const SnapRecord& record) {
+                           return record.window == window ||
+                                  !IsWindow(record.window);
+                       }),
+        snapRecords_.end());
+    if (snapRecords_.size() >= kMaxSnapRecords) {
+        snapRecords_.erase(snapRecords_.begin());
+    }
+    snapRecords_.push_back({window, snappedRect, restoreSize});
+}
+
+void NekoDragApp::ForgetSnap(HWND window) {
+    snapRecords_.erase(
+        std::remove_if(snapRecords_.begin(), snapRecords_.end(),
+                       [window](const SnapRecord& record) {
+                           return record.window == window;
+                       }),
+        snapRecords_.end());
+}
+
+void NekoDragApp::FinishManualDrag(const wchar_t* reason) {
+    if (drag_.active && drag_.mode == DragMode::ManualFallback) {
+        ApplySnapOnRelease();
+    }
+    EndDrag(reason);
 }
 
 void NekoDragApp::EndDrag(const wchar_t* reason, bool trace) {
@@ -2705,6 +2982,7 @@ void NekoDragApp::EndDrag(const wchar_t* reason, bool trace) {
         }
         RollbackMaximizedNativeRestoreIfNeeded(false);
     }
+    HideSnapPreview();
     RemoveNativeEscapeHook();
     if (drag_.active && trace) {
         if (drag_.mode == DragMode::ManualFallback) {

@@ -190,8 +190,21 @@ WH_MOUSE_LL
   最多只有一个潜在阻塞线程，不会反复 detach 并累积。每次原生拖动结束都会重装
   低级钩子，恢复可能被 Windows 静默移除的 HHOOK。
 - 兼容路径继续使用原有最大化恢复和 500ms 最终坐标等待，以钩子观察到的真实
-  左键释放结束拖动。该路径只通过 `SetWindowPos` 移动窗口，不模拟 Windows
-  Snap、跨屏 DPI 重算或 Esc 回滚。
+  左键释放结束拖动。该路径通过 `SetWindowPos` 移动窗口，不模拟跨屏 DPI 重算
+  或 Esc 回滚。
+- 兼容路径提供简易边缘贴靠（`SPI_GETWINARRANGING` 关闭时禁用）。光标移动超过
+  `SM_CXDRAG/SM_CYDRAG` 后，`DetectSnapZone` 按光标所在显示器判定区域：只有
+  外侧无相邻显示器的边触发；左/右边缘为半屏，沿边缘距角落
+  `短边/kSnapCornerDivisor` 内为四分之一屏，顶部边缘为最大化，底部只有两角。
+  半屏/四分之一屏要求 `WS_THICKFRAME`，最大化要求 `WS_MAXIMIZEBOX`。
+- 拖动中在被拖窗口正下方显示分层、鼠标穿透的预览窗口（系统高亮色）。最终
+  坐标完成后（`FinishManualDrag`），最大化使用 `ShowWindowAsync(SW_MAXIMIZE)`；
+  其余区域用 `DWMWA_EXTENDED_FRAME_BOUNDS` 补偿不可见边框后发送一次
+  `SWP_ASYNCWINDOWPOS`，避免繁忙目标阻塞钩子线程。最终坐标超时等异常结束不贴靠。
+- 每次贴靠记录窗口句柄、贴靠后矩形和贴靠前尺寸（最多 32 条）。下次兼容拖动时
+  若窗口矩形仍与记录一致，超过拖动阈值后仅以 `SWP_NOMOVE` 异步恢复尺寸，并按
+  `ComputeRestoredOrigin` 重算抓取偏移；原点仍由串行移动工作线程负责，因此
+  异步尺寸调整不会与位置请求互相覆盖。
 
 ### 重要历史与限制
 

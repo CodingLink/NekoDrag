@@ -382,6 +382,102 @@ void TestNativeMoveEventTimeMatching() {
            "an inactive event token rejects queued events");
 }
 
+void TestSnapZoneDetection() {
+    using namespace nekodrag;
+
+    // 1920x1080 monitor: corners extend 1080/16 = 67 px along each edge.
+    const Rect monitor{0, 0, 1920, 1080};
+    const SnapEdges allOpen{true, true, true, true};
+    constexpr std::int32_t kThreshold = 2;
+
+    Expect(DetectSnapZone({960, 540}, monitor, allOpen, kThreshold) ==
+               SnapZone::None,
+           "the monitor center does not snap");
+    Expect(DetectSnapZone({0, 540}, monitor, allOpen, kThreshold) ==
+               SnapZone::LeftHalf,
+           "the left edge snaps to the left half");
+    Expect(DetectSnapZone({1, 540}, monitor, allOpen, kThreshold) ==
+               SnapZone::LeftHalf,
+           "the edge threshold tolerates a near miss");
+    Expect(DetectSnapZone({2, 540}, monitor, allOpen, kThreshold) ==
+               SnapZone::None,
+           "a cursor beyond the threshold does not snap");
+    Expect(DetectSnapZone({1919, 540}, monitor, allOpen, kThreshold) ==
+               SnapZone::RightHalf,
+           "the right edge snaps to the right half");
+    Expect(DetectSnapZone({960, 0}, monitor, allOpen, kThreshold) ==
+               SnapZone::Maximize,
+           "the top edge maximizes");
+    Expect(DetectSnapZone({960, 1079}, monitor, allOpen, kThreshold) ==
+               SnapZone::None,
+           "the bottom edge away from corners does not snap");
+    Expect(DetectSnapZone({0, 10}, monitor, allOpen, kThreshold) ==
+               SnapZone::TopLeft,
+           "the left edge near the top snaps to the top-left quarter");
+    Expect(DetectSnapZone({10, 0}, monitor, allOpen, kThreshold) ==
+               SnapZone::TopLeft,
+           "the top edge near the left snaps to the top-left quarter");
+    Expect(DetectSnapZone({1919, 1070}, monitor, allOpen, kThreshold) ==
+               SnapZone::BottomRight,
+           "the bottom-right corner snaps to its quarter");
+    Expect(DetectSnapZone({1900, 1079}, monitor, allOpen, kThreshold) ==
+               SnapZone::BottomRight,
+           "the bottom edge near the right snaps to the quarter");
+    Expect(DetectSnapZone({0, 70}, monitor, allOpen, kThreshold) ==
+               SnapZone::LeftHalf,
+           "the left edge outside the corner extent stays a half snap");
+
+    const SnapEdges rightShared{true, true, false, true};
+    Expect(DetectSnapZone({1919, 540}, monitor, rightShared, kThreshold) ==
+               SnapZone::None,
+           "an edge shared with another monitor does not snap");
+
+    const Rect secondary{-1280, -200, 0, 824};
+    Expect(DetectSnapZone({-1280, 300}, secondary, allOpen, kThreshold) ==
+               SnapZone::LeftHalf,
+           "negative monitor coordinates detect the left edge");
+    Expect(DetectSnapZone({0, 300}, secondary, allOpen, kThreshold) ==
+               SnapZone::None,
+           "a cursor outside the monitor rectangle does not snap");
+}
+
+void TestSnapRectangles() {
+    using namespace nekodrag;
+
+    const Rect work{0, 0, 1920, 1040};
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::LeftHalf, work),
+                      Rect{0, 0, 960, 1040}),
+           "left half covers the left side of the work area");
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::RightHalf, work),
+                      Rect{960, 0, 1920, 1040}),
+           "right half covers the right side of the work area");
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::TopRight, work),
+                      Rect{960, 0, 1920, 520}),
+           "top-right quarter covers the upper right");
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::BottomLeft, work),
+                      Rect{0, 520, 960, 1040}),
+           "bottom-left quarter covers the lower left");
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::Maximize, work), work),
+           "maximize previews the whole work area");
+
+    const Rect offsetWork{-1280, 40, 0, 1024};
+    Expect(RectsEqual(ComputeSnapRect(SnapZone::RightHalf, offsetWork),
+                      Rect{-640, 40, 0, 1024}),
+           "snap rectangles respect negative and offset work areas");
+
+    // Windows 10/11 frames: 7 px invisible borders left/right/bottom.
+    const Rect windowRect{93, 100, 907, 707};
+    const Rect visibleFrame{100, 100, 900, 700};
+    Expect(RectsEqual(ExpandByFrameMargins(Rect{0, 0, 960, 1040},
+                                           windowRect, visibleFrame),
+                      Rect{-7, 0, 967, 1047}),
+           "invisible resize borders are added around the snap target");
+    Expect(RectsEqual(ExpandByFrameMargins(Rect{0, 0, 960, 1040},
+                                           visibleFrame, visibleFrame),
+                      Rect{0, 0, 960, 1040}),
+           "borderless windows keep the snap target unchanged");
+}
+
 }  // namespace
 
 int main() {
@@ -398,6 +494,8 @@ int main() {
     TestMaximizedNativeRollbackDecision();
     TestShouldCancelTargetNativeMove();
     TestNativeMoveEventTimeMatching();
+    TestSnapZoneDetection();
+    TestSnapRectangles();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";
         return EXIT_FAILURE;
