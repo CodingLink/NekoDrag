@@ -4,11 +4,10 @@
 
 # NekoDrag
 
-**轻量的 Windows 窗口拖动工具 —— 按住修饰键，从窗口任意位置拖动**
+**按住修饰键，从窗口任意位置拖动它 —— 不用再瞄准标题栏**
 
 [![CI](https://github.com/CodingLink/NekoDrag/actions/workflows/release.yml/badge.svg)](https://github.com/CodingLink/NekoDrag/actions/workflows/release.yml)
-[![Release](https://img.shields.io/github/v/release/CodingLink/NekoDrag)](https://github.com/CodingLink/NekoDrag/releases)
-[![Version](https://img.shields.io/github/v/tag/CodingLink/NekoDrag?include_prereleases&sort=semver)](https://github.com/CodingLink/NekoDrag/tags)
+[![Release](https://img.shields.io/github/v/release/CodingLink/NekoDrag?include_prereleases)](https://github.com/CodingLink/NekoDrag/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)](https://github.com/CodingLink/NekoDrag)
 
 **[中文](#中文) · [English](#english)**
@@ -20,56 +19,38 @@
 <a id="中文"></a>
 ## 中文
 
-NekoDrag 是一个原生 C++17/Win32 实现的 Windows 10/11 x64 托盘程序。按住所选修饰键（默认 `Win+Alt`），即可在普通窗口的任意位置按住鼠标左键拖动窗口，无需瞄准标题栏。
+NekoDrag 是一个 Windows 10/11 托盘小工具。按住 `Win+Alt`（可自定义），在窗口里任意位置按下鼠标左键，就能把整个窗口拖走；拖到屏幕边缘还能贴靠成半屏或四分之一屏。
 
-### 目录
+单个 EXE，无需安装，无 .NET 或其他运行时依赖，以普通用户权限运行。
 
-- [功能特性](#功能特性)
-- [下载](#下载)
-- [使用方法](#使用方法)
-- [从源码构建](#从源码构建)
-- [已知限制](#已知限制)
+### 快速开始
 
-### 功能特性
+1. 从 [Releases](https://github.com/CodingLink/NekoDrag/releases) 下载 `NekoDrag-*-windows-x64.zip`，解压。
+2. 运行 `NekoDrag.exe`。首次运行会打开设置窗口，确认快捷键后保存。
+3. 按住 `Win+Alt`，在任意窗口内按住左键拖动。
 
-**核心拖动**
+> 程序没有代码签名，Windows SmartScreen 可能提示「未知发布者」，点「更多信息 → 仍要运行」即可。每个 zip 都附带 `.sha256`，可用 `Get-FileHash .\NekoDrag-*.zip -Algorithm SHA256` 校验。
 
-- 默认 `Win+Alt` + 鼠标左键，在窗口任意位置启动拖动
-- Win、Ctrl、Alt、Shift 中任选 1–3 个修饰键，精确匹配（多按不触发）
-- 拖动开始后可提前松开修饰键，释放左键才结束
-- 支持从后台窗口直接开始拖动并将其激活
-- 拖动最大化窗口时自动恢复原始尺寸
+### 功能
 
-**拖动引擎**
+**拖动**
 
-- 三种可选模式：**兼容模式（推荐）** / **自动模式（实验）** / **原生模式（诊断）**
-- 新安装默认使用兼容模式；已保存的合法模式保持不变
-- 自动模式优先尝试实验性 Windows 原生移动循环，原生启动失败时回退到兼容模式；对 Chromium 窗口（Edge/Chrome/Electron 等自绘框架）则跳过原生尝试、直接走兼容拖动
-- 自动/仅原生模式会放行真实鼠标按下以建立 Windows 按键状态，并在首次移动时用 `WM_CANCELMODE` 尽力取消控件交互；控件仍可能发生焦点或选择变化
-- 最大化窗口会在原生派发前按鼠标相对位置恢复；正常完成保持恢复状态，Esc 或仅原生启动失败会重新最大化
-- 成功进入原生移动循环时，Snap 贴靠、跨屏 DPI 和 Esc 取消由 Windows 处理；不保证所有第三方窗口都支持该路径
-- 兼容模式使用 `SetWindowPos` 跟随鼠标，并提供简易边缘贴靠：拖到屏幕左/右边缘贴半屏、四角贴四分之一屏、顶部边缘最大化，拖动时显示半透明预览；再次拖动已贴靠窗口会恢复原尺寸。贴靠跟随 Windows「贴靠窗口」开关；兼容模式不提供跨屏 DPI 重算或 Esc 回滚语义
-- 实现细节见 [技术概述](docs/TECHNICAL_OVERVIEW.md)
+- 在窗口任意位置按住左键即可拖动，后台窗口会被激活并置前
+- 修饰键可在 Win / Ctrl / Alt / Shift 中任选 1–3 个，且必须精确匹配：设为 `Win+Alt` 时，多按一个 `Shift` 不会触发，不影响其他快捷键
+- 拖动开始后可以先松开修饰键，松开左键才结束
+- 拖动最大化的窗口会先恢复原尺寸，鼠标在窗口上的相对位置保持不变
 
-**轻量便携**
+**边缘贴靠**
 
-- 无 .NET、无第三方运行时，静态 MSVC 运行时，单个便携 EXE
-- 普通用户权限运行，不请求 UAC
-- 设置保存在 `HKCU\Software\NekoDrag`
+- 拖到屏幕左 / 右边缘：贴半屏
+- 拖到四个角：贴四分之一屏
+- 拖到顶部边缘：最大化
+- 拖动时会显示半透明预览框；再次拖动已贴靠的窗口会恢复贴靠前的大小
+- 跟随 Windows 设置中的「贴靠窗口」开关；两块显示器相邻的边不会触发
 
-### 下载
+**托盘菜单**
 
-从 [GitHub Releases](https://github.com/CodingLink/NekoDrag/releases) 下载最新的 `NekoDrag-*-windows-x64.zip`，解压后即可直接运行，无需安装。
-
-每个 zip 附带 `.sha256` 校验文件，可在 PowerShell 中验证：
-
-```powershell
-Get-FileHash .\NekoDrag-*-windows-x64.zip -Algorithm SHA256
-```
-
-> 程序未签名，Windows SmartScreen 可能对未知发布者显示提示，选择"仍要运行"即可。
-
-### 使用方法
+- 暂停 / 启用、打开设置、开机启动、退出
 
 <div align="center">
 
@@ -77,16 +58,28 @@ Get-FileHash .\NekoDrag-*-windows-x64.zip -Algorithm SHA256
 
 </div>
 
-1. 首次运行 `NekoDrag.exe`，在设置窗口中确认快捷键和拖动模式。
-2. 按住所选修饰键，在目标窗口任意位置按住鼠标左键并移动。
-3. 拖动开始后可以先松开修饰键；释放鼠标左键后结束拖动。
-4. 通过托盘菜单暂停功能、修改设置、启用开机启动或退出。
+### 拖动模式
 
-只有配置中选中的修饰键被按下时才会启动拖动。例如配置 `Win+Alt` 后，同时按住 `Shift` 不会触发。
+设置中有三种模式，大多数情况下保持默认的兼容模式即可。
+
+| 模式 | 工作方式 | 适合 |
+| --- | --- | --- |
+| **兼容模式（推荐，默认）** | NekoDrag 自己跟随鼠标移动窗口，贴靠也由 NekoDrag 完成 | 日常使用，对各类窗口最稳定 |
+| **自动模式（实验）** | 先尝试让 Windows 接管拖动（与拖标题栏效果一致，含系统 Snap、跨屏 DPI 调整和 Esc 取消），失败时回退到兼容模式；Chrome / Edge / Electron 等窗口直接使用兼容模式 | 想要原生拖动体验 |
+| **原生模式（诊断）** | 只使用 Windows 原生拖动，失败也不回退 | 排查问题 |
+
+自动和原生模式会把鼠标按下传给目标窗口，因此按下位置的控件可能获得焦点或产生选中。兼容模式不会。
+
+### 已知限制
+
+- 无法拖动以管理员身份运行的窗口、受保护窗口、UAC 提示和安全桌面（NekoDrag 不请求提权，遇到时只提示一次）。
+- 独占全屏游戏和带反作弊输入保护的软件不保证可用。
+- 兼容模式不会在跨屏时按目标显示器 DPI 重新计算窗口大小，也不支持按 Esc 撤销拖动。
+- 移动 EXE 位置后，直接运行一次即可更新开机启动路径。
 
 ### 从源码构建
 
-需要 Visual Studio 2026（或 2022），安装"使用 C++ 的桌面开发"和 CMake 组件：
+需要 Visual Studio 2026 或 2022（「使用 C++ 的桌面开发」工作负载，含 CMake）：
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON
@@ -94,91 +87,75 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-使用 Visual Studio 2022 时改为 `-G "Visual Studio 17 2022"`。
+- 使用 VS 2022 时把生成器换成 `"Visual Studio 17 2022"`。
+- 产物为 `build\Release\NekoDrag.exe`，静态链接 MSVC 运行时，可单独分发。
+- 加 `-DNEKODRAG_TRACE=ON` 可构建诊断版，拖动状态通过 `OutputDebugString` 输出，用 DebugView 查看。
+- 请始终使用全新的空构建目录，旧目录可能残留仓库改名前的绝对路径。
 
-生成的便携程序位于 `build\Release\NekoDrag.exe`，Release 配置使用静态 MSVC 运行时，无需随程序分发额外 DLL。
+**发布新版本**：版本号只写在 `CMakeLists.txt` 的 `NEKODRAG_VERSION` 中。先改版本号并提交，再推送同名 tag（如 `v0.1.0-beta.8`），CI 会校验两者一致后构建并创建 Release。
 
-- **诊断构建**：加 `-DNEKODRAG_TRACE=ON`，拖动状态转换通过 `OutputDebugString` 输出，可用 DebugView 抓取。
-- **注意**：旧构建目录含有原仓库的绝对路径，仓库改名后请使用全新的空构建目录。
-
-### 已知限制
-
-- 不控制管理员权限窗口、受保护窗口、安全桌面或 UAC 提示。
-- 不保证兼容独占全屏游戏及带有反作弊输入保护的软件。
-- 移动 EXE 后，直接运行一次即可刷新已启用的开机启动路径。
+更多实现细节见 [技术概述](docs/TECHNICAL_OVERVIEW.md)，手工验收项见 [Windows QA 清单](docs/WINDOWS_QA.md)。
 
 ---
 
 <a id="english"></a>
 ## English
 
-NekoDrag is a lightweight Windows 10/11 x64 tray utility written in native C++17/Win32. Hold your chosen modifier keys (`Win+Alt` by default) and drag any normal window from anywhere inside it with the left mouse button — no need to aim for the title bar.
+NekoDrag is a small Windows 10/11 tray utility. Hold `Win+Alt` (configurable), press the left mouse button anywhere inside a window, and drag the whole window. Drop it on a screen edge to snap it to a half or a quarter of the screen.
 
-### Contents
+A single portable EXE: no installer, no .NET or other runtimes, runs with standard user privileges.
 
-- [Features](#features)
-- [Download](#download)
-- [Usage](#usage)
-- [Build from source](#build-from-source)
-- [Known limitations](#known-limitations)
+### Quick start
+
+1. Download `NekoDrag-*-windows-x64.zip` from [Releases](https://github.com/CodingLink/NekoDrag/releases) and extract it.
+2. Run `NekoDrag.exe`. The settings window opens on first launch; confirm the hotkey and save.
+3. Hold `Win+Alt`, then press and drag with the left button anywhere inside a window.
+
+> The binary is not code-signed, so SmartScreen may warn about an unknown publisher. Choose "More info → Run anyway". Each zip ships with a `.sha256` file; verify with `Get-FileHash .\NekoDrag-*.zip -Algorithm SHA256`.
 
 ### Features
 
-**Core dragging**
+**Dragging**
 
-- Drag windows from anywhere with `Win+Alt` + left mouse button by default
-- Pick any 1–3 of Win, Ctrl, Alt, Shift as modifiers; matched exactly (extra keys don't trigger)
-- Modifiers can be released once the drag starts; it ends when the left button is released
-- Start dragging from background windows and activate them
-- Maximized windows are automatically restored when dragged
+- Drag from anywhere inside a window; background windows are activated and brought to front
+- Pick 1–3 of Win / Ctrl / Alt / Shift as modifiers, matched exactly: with `Win+Alt`, also holding `Shift` does not trigger, so other shortcuts keep working
+- Modifiers can be released once the drag starts; the drag ends when you release the left button
+- Maximized windows are restored first, keeping the pointer at the same relative spot
 
-**Drag engine**
+**Edge snapping**
 
-- Three selectable modes: **Compatibility (recommended)** / **Auto (experimental)** / **Native only (diagnostic)**
-- New installations default to compatibility mode; existing valid saved modes are preserved
-- Auto first tries the experimental native Windows move loop and falls back to compatibility mode if native startup fails
-- Auto/native-only forwards the real mouse press to establish Windows button state, then uses best-effort `WM_CANCELMODE` cleanup on first movement; controls may still change focus or selection
-- Maximized windows are restored around the pointer before native dispatch; normal completion keeps them restored, while Esc or native-only startup failure maximizes them again
-- When the native move loop starts successfully, Windows handles Snap, multi-monitor DPI, and Esc cancellation; this path is not supported by every third-party window
-- Compatibility mode follows the pointer with `SetWindowPos` and adds simple edge snapping: left/right screen edges snap to halves, corners to quarters, and the top edge maximizes, with a translucent preview while dragging; dragging a snapped window again restores its previous size. Snapping follows the Windows "Snap windows" setting; compatibility mode does not provide cross-monitor DPI recalculation or Esc rollback semantics
-- See the [technical overview](docs/TECHNICAL_OVERVIEW.md) for implementation details
+- Left / right screen edge: snap to half
+- Corners: snap to quarter
+- Top edge: maximize
+- A translucent preview shows while dragging; dragging a snapped window again restores its previous size
+- Follows the Windows "Snap windows" setting; edges shared by two monitors never trigger
 
-**Lightweight and portable**
+**Tray menu**
 
-- No .NET, no third-party runtimes — a single portable EXE with the MSVC runtime statically linked
-- Runs with standard user privileges; never requests UAC elevation
-- Settings stored under `HKCU\Software\NekoDrag`
+- Pause / resume, settings, launch at logon, quit
 
-### Download
+### Drag modes
 
-Grab the latest `NekoDrag-*-windows-x64.zip` from [GitHub Releases](https://github.com/CodingLink/NekoDrag/releases), extract it, and run — no installation required.
+The settings window offers three modes. The default compatibility mode is the right choice for most people.
 
-Each zip ships with a `.sha256` checksum file. Verify in PowerShell:
+| Mode | How it works | Best for |
+| --- | --- | --- |
+| **Compatibility (recommended, default)** | NekoDrag moves the window itself and handles snapping | Everyday use; most reliable across apps |
+| **Auto (experimental)** | Asks Windows to take over the drag (same as dragging the title bar, including system Snap, cross-monitor DPI and Esc to cancel); falls back to compatibility if that fails. Chrome / Edge / Electron windows go straight to compatibility | A native drag feel |
+| **Native only (diagnostic)** | Windows native drag only, no fallback | Troubleshooting |
 
-```powershell
-Get-FileHash .\NekoDrag-*-windows-x64.zip -Algorithm SHA256
-```
+Auto and native-only forward the mouse press to the target window, so the control under the pointer may gain focus or start a selection. Compatibility mode does not.
 
-> The binary is unsigned, so Windows SmartScreen may warn about an unknown publisher — choose "Run anyway".
+### Known limitations
 
-### Usage
-
-<div align="center">
-
-<img src="img/menu.png" alt="NekoDrag settings window" width="400">
-
-</div>
-
-1. Run `NekoDrag.exe`; on first launch, confirm the hotkeys and drag mode in the settings window.
-2. Hold the configured modifiers, then hold the left mouse button anywhere on the target window and move.
-3. Modifiers can be released once the drag starts; releasing the left button ends it.
-4. Use the tray menu to pause, change settings, toggle launch at logon, or quit.
-
-A drag only starts when exactly the configured modifiers are held. With `Win+Alt` configured, also holding `Shift` will not trigger it.
+- Cannot drag elevated or protected windows, UAC prompts, or the secure desktop (NekoDrag never requests elevation and shows a one-time hint instead).
+- Exclusive-fullscreen games and software with anti-cheat input protection are not guaranteed to work.
+- Compatibility mode does not rescale windows for a different monitor DPI and does not support Esc to undo a drag.
+- After moving the EXE, run it once to update the launch-at-logon path.
 
 ### Build from source
 
-Requires Visual Studio 2026 (or 2022) with the "Desktop development with C++" workload and CMake:
+Requires Visual Studio 2026 or 2022 with the "Desktop development with C++" workload (includes CMake):
 
 ```powershell
 cmake -S . -B build -G "Visual Studio 18 2026" -A x64 -DBUILD_TESTING=ON
@@ -186,15 +163,11 @@ cmake --build build --config Release --parallel
 ctest --test-dir build -C Release --output-on-failure
 ```
 
-For Visual Studio 2022, use `-G "Visual Studio 17 2022"` instead.
+- For VS 2022, use the `"Visual Studio 17 2022"` generator.
+- Output is `build\Release\NekoDrag.exe`, with the MSVC runtime linked statically, so it can ship on its own.
+- Add `-DNEKODRAG_TRACE=ON` for a diagnostic build that logs drag state via `OutputDebugString` (view with DebugView).
+- Always configure into a fresh, empty build directory; old ones may hold absolute paths from before the repository was renamed.
 
-The portable binary is produced at `build\Release\NekoDrag.exe`. Release builds link the MSVC runtime statically, so no extra DLLs need to ship with the program.
+**Releasing**: the version lives only in `NEKODRAG_VERSION` in `CMakeLists.txt`. Bump and commit it, then push the matching tag (e.g. `v0.1.0-beta.8`). CI checks that they match, builds, and creates the release.
 
-- **Diagnostic build**: add `-DNEKODRAG_TRACE=ON` to log drag state transitions via `OutputDebugString` (capture with DebugView).
-- **Note**: old build directories contain absolute paths of the previous repository location — use a fresh, empty build directory after renaming.
-
-### Known limitations
-
-- Does not control elevated/protected windows, secure desktops, or UAC prompts.
-- Not guaranteed to work with exclusive-fullscreen games or software with anti-cheat input protection.
-- After moving the EXE, run it once to refresh the launch-at-logon path.
+See the [technical overview](docs/TECHNICAL_OVERVIEW.md) (Chinese) for implementation details.
